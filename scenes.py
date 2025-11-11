@@ -28,10 +28,19 @@ def _build_base_scene(camera_pos=(3, -1, 1.5), camera_lookat=(0.0, 0.0, 0.5)) ->
 
 def _elevate_robot_base(franka: Any) -> None:
     """Slightly raise robot base to avoid initial collisions."""
-    base_pos = np.asarray(franka.get_pos(), dtype=float)
+    # Get position as tensor (might be on GPU)
+    base_pos_tensor = franka.get_pos()
+    
+    # Move to CPU if necessary and convert to numpy
+    if base_pos_tensor.is_cuda:
+        base_pos = base_pos_tensor.cpu().numpy()
+    else:
+        base_pos = base_pos_tensor.numpy()
+    
     new_pos = base_pos.copy()
     new_pos[2] += 0.01
     franka.set_pos(new_pos) 
+
 
 def _rand_xy(base, noise=0.05):
         dx = random.uniform(-noise, noise)

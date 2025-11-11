@@ -203,8 +203,11 @@ class PlannerInterface:
         self.robot.set_qpos(qpos_cur)
 
         return waypoints
-
+    
+    """ TODO : TESTED WHILE IGNORING COLLISIONS ,
+            NEED TO ADD IMPLEMENT WITH COLLISIONS """ 
     def _is_ompl_state_valid(self, state):
+        """  
         self.robot.set_qpos(self._ompl_state_to_tensor(state))
         collision_pairs = self.robot.detect_collision()
 
@@ -215,6 +218,8 @@ class PlannerInterface:
             return False
 
         return self.collision_with_attached_object(collision_pairs)
+        """ 
+        return True # IGNORE COLLISIONS FOR NOW, REMOVE LATER
 
     def collision_with_attached_object(self, collision_pairs):
         finger_names = {"left_finger", "right_finger", "hand"}
