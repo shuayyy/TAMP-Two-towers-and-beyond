@@ -17,6 +17,9 @@ from symbolic_abstraction import (
     debug_spatial_relationships
 )
 
+# NEW: import from Phase 2 problem generator
+from pddl.problem_generator import make_problem_pddl, DOMAIN_FILE
+
 
 def example_1_basic_usage():
     """Example 1: Basic usage - abstracting state from a scene."""
@@ -163,7 +166,7 @@ def example_3_goal_checking():
 def example_4_integration_loop():
     """Example 4: How to use in TAMP execution loop (Person 4 integration)."""
     print("\n" + "="*60)
-    print("EXAMPLE 4: Integration Loop Pattern")
+    print("EXAMPLE 4: Integration Loop")
     print("="*60)
 
     # Initialize
@@ -264,6 +267,40 @@ def example_5_debugging():
     print(f"Is RED clear? {is_clear('r', positions)}")
 
 
+def example_6_generate_pddl():
+    """Example 6: Generate PDDL problem from current state for Goal 1."""
+    print("\n" + "="*60)
+    print("EXAMPLE 6: Generate PDDL Problem")
+    print("="*60)
+
+    # Initialize Genesis
+    gs.init(backend=gs.cpu, logging_level='Warning', logger_verbose_time=False)
+    scene, robot, blocks_state = create_scene_6blocks()
+    robot.set_dofs_kp(np.array([4500, 4500, 3500, 3500, 2000, 2000, 2000, 100, 100]))
+    robot.set_dofs_kv(np.array([450, 450, 350, 350, 200, 200, 200, 10, 10]))
+
+    # Let physics settle
+    for _ in range(100):
+        scene.step()
+
+    # Get current abstract state
+    predicates = abstract_state(scene, robot, blocks_state)
+    visualize_predicates(predicates, "State used for PDDL problem")
+
+    # Generate PDDL problem file for Goal 1
+    problem_file = make_problem_pddl(
+        current_predicates=predicates,
+        goal_id=1,
+        problem_name="demo_goal1"
+    )
+
+    print("\nGenerated PDDL files:")
+    print(f"  Domain:  {DOMAIN_FILE}")
+    print(f"  Problem: {problem_file}")
+    print("\nYou can now test the planner with:")
+    print(f"  pyperplan {DOMAIN_FILE} {problem_file}")
+
+
 def main():
     """Run all examples."""
     examples = [
@@ -272,6 +309,7 @@ def main():
         ("Goal Checking", example_3_goal_checking),
         ("Integration Loop", example_4_integration_loop),
         ("Debugging", example_5_debugging),
+        ("Generate PDDL", example_6_generate_pddl),
     ]
 
     print("\n" + "="*60)
@@ -306,13 +344,14 @@ if __name__ == "__main__":
             3: example_3_goal_checking,
             4: example_4_integration_loop,
             5: example_5_debugging,
+            6: example_6_generate_pddl,
         }
 
         if example_num in examples:
             examples[example_num]()
         else:
             print(f"Invalid example number: {example_num}")
-            print("Usage: python example_usage.py [1-5]")
+            print("Usage: python example_usage.py [1-6]")
     else:
         # Run all examples
         main()
