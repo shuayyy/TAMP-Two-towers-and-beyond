@@ -151,7 +151,26 @@ class PlannerInterface:
         self.attached_object = attached_object
         
         ss.setStateValidityChecker(ob.StateValidityCheckerFn(self._is_ompl_state_valid))
-        ss.setPlanner(getattr(og, planner)(ss.getSpaceInformation()))
+
+
+        # --- Create planner explicitly ---
+        try:
+            planner_obj = getattr(og, planner)(ss.getSpaceInformation())
+            ss.setPlanner(planner_obj)
+            print(f"[DEBUG][Planner] Created planner: {planner}")
+
+            # --- Try to get or set range directly (most reliable method) ---
+            if hasattr(planner_obj, "getRange") and hasattr(planner_obj, "setRange"):
+                current_range = planner_obj.getRange()
+                print(f"[DEBUG][Planner] Default step size (range): {current_range:.4f}")
+                planner_obj.setRange(0.05)
+                print("[DEBUG][Planner] Range set to 0.05")
+            else:
+                print("[DEBUG][Planner] This planner does not support getRange()/setRange().")
+
+        except Exception as e:
+            print(f"[DEBUG][Planner] Could not read/set range: {e}")
+
 
         state_start = ob.State(space)
         state_goal = ob.State(space)
@@ -243,7 +262,7 @@ class PlannerInterface:
             # Allowed contact (finger ↔ attached cube)
             if (name_a in finger_names and b == self.attached_object.idx) or \
             (name_b in finger_names and a == self.attached_object.idx):
-                print(f"[DEBUG] Skipping finger↔attached cube collision (cube idx={self.attached_object.idx}).")
+                # print(f"[DEBUG] Skipping finger↔attached cube collision (cube idx={self.attached_object.idx}).")
                 return True  # filter succeeds
         return False
 

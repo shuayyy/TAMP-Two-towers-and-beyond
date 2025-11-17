@@ -43,7 +43,11 @@ def get_block_positions(blocks_state: Dict[str, Any]) -> Dict[str, np.ndarray]:
     for block_name, block_entity in blocks_state.items():
         pos = block_entity.get_pos()
         # Convert to numpy array for easier manipulation
-        positions[block_name] = np.array(pos, dtype=float)
+        try:
+            positions[block_name] = pos.cpu().numpy()
+        except:
+            positions[block_name] = np.array(pos, dtype=float)
+
     return positions
 
 
@@ -60,11 +64,21 @@ def get_gripper_state(robot: Any) -> Tuple[np.ndarray, bool]:
     """
     # Get end effector (hand) link position
     hand_link = robot.get_link("hand")
-    gripper_pos = np.array(hand_link.get_pos(), dtype=float)
+    pos = hand_link.get_pos()
+    try:
+        gripper_pos = pos.cpu().numpy()
+    except:
+        gripper_pos = np.array(pos, dtype=float)
+
 
     # Get gripper joint positions (last 2 DOFs are gripper fingers)
     qpos = robot.get_qpos()
-    gripper_width = qpos[-2] + qpos[-1]  # Sum of both finger positions
+    try:
+        qpos_cpu = qpos.cpu().numpy()
+    except:
+        qpos_cpu = np.array(qpos, dtype=float)
+
+    gripper_width = qpos_cpu[-2] + qpos_cpu[-1]# Sum of both finger positions
 
     # Gripper is considered closed if width is small
     # Open: 0.04 + 0.04 = 0.08

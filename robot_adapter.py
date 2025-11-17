@@ -25,8 +25,9 @@ class RobotAdapter:
         self.scene = scene
 
         # --- grasp/attachment state ---
-        self.attached_object: Optional[Any] = None
-        self._attached_offset_world: Optional[np.ndarray] = None  # obj_pos - hand_pos
+        self.attached_object = None
+        self._attach_offset = None
+        self._sync_cb = None
 
     # ------------------------------------------------------------------
     # Transparent forwarding
@@ -89,94 +90,96 @@ class RobotAdapter:
         qpos[-2:] = open_pos
         self.control_dofs_position(qpos)
         for _ in range(steps):
-            self._sync_attached_object()
             self.scene.step()
         self.print_ee_pose("After open_gripper()")
 
-    def close_gripper(self, close_pos=0.0, steps=20):
+    def close_gripper(self, close_pos=0.0, steps=100):
         self.print_ee_pose("Before close_gripper()")
         qpos = self.get_qpos()
         qpos[-2:] = close_pos
         self.control_dofs_position(qpos)
         for _ in range(steps):
-            self._sync_attached_object()
             self.scene.step()
         self.print_ee_pose("After close_gripper()")
 
     # ------------------------------------------------------------------
     # ATTACH / DETACH (virtual, version-agnostic)
     # ------------------------------------------------------------------
-    def attach_object(self, obj: Any):
-        """
-        Virtually attach an object to the gripper (hand). We store a world-space
-        offset so we can keep the object aligned during motions.
-        """
-        hand = self.get_link("hand")
-        hand_pos = hand.get_pos().cpu().numpy()
-        obj_pos = obj.get_pos().cpu().numpy()
-
-        self._attached_offset_world = obj_pos - hand_pos
+    def attach_object(self, obj):
+        """Save hand→obj offset and start kinematic sync."""
         self.attached_object = obj
+        hand = self.get_link("hand")
+        hand_pos = hand.get_pos()
+        obj_pos = obj.get_pos()
+        try: hand_pos = hand_pos.cpu().numpy()
+        except: pass
+        try: obj_pos = obj_pos.cpu().numpy()
+        except: pass
+        offset = obj_pos - hand_pos
+        offset[0] = 0.0   # lock X to hand
+        offset[1] = 0.0   # lock Y to hand
+        self._attach_offset = offset
 
-
-        # Soften collisions if API exists (varies by Genesis version)
-        if hasattr(obj, "set_collision_enabled"):
-            try: obj.set_collision_enabled(False)
-            except Exception: pass
-        elif hasattr(obj, "disable_collisions"):
-            try: obj.disable_collisions()
-            except Exception: pass
-        elif hasattr(obj, "set_collision_mask"):
-            try: obj.set_collision_mask(0)
-            except Exception: pass
-
-        print(f"[INFO] Attached {getattr(obj, 'name', 'object')} to gripper.")
+        self._enable_sync()
+        print("[ROBOT][ATTACH] attached; offset =", self._attach_offset)
 
     def detach_object(self):
-        """
-        Release the currently attached object, if any, and re-enable collisions.
-        """
-        obj = self.attached_object
-        if obj is None:
-            return
-
-        # Re-enable collisions when possible
-        if hasattr(obj, "set_collision_enabled"):
-            try: obj.set_collision_enabled(True)
-            except Exception: pass
-        elif hasattr(obj, "enable_collisions"):
-            try: obj.enable_collisions()
-            except Exception: pass
-        elif hasattr(obj, "set_collision_mask"):
-            try: obj.set_collision_mask(1)
-            except Exception: pass
-
-        print(f"[INFO] Detached {getattr(obj, 'name', 'object')} from gripper.")
+        """Stop kinematic sync and clear state."""
+        self._disable_sync()
         self.attached_object = None
-        self._attached_offset_world = None
+        self._attach_offset = None
+        print("[ROBOT][DETACH] detached")
+
 
     def _sync_attached_object(self):
-        """
-        If an object is attached, keep it aligned to the hand using the stored offset.
-        This is called every simulation step while we are moving.
-        """
-        if self.attached_object is None or self._attached_offset_world is None:
+        """Keep the attached object rigidly at the hand each sim step."""
+        if self.attached_object is None or self._attach_offset is None:
             return
         hand = self.get_link("hand")
-        hand_pos = hand.get_pos().cpu().numpy()
-        hand_quat = hand.get_quat().cpu().numpy()
+        hand_pos = hand.get_pos()
+        hand_quat = hand.get_quat()
+        try: hand_pos = hand_pos.cpu().numpy()
+        except: pass
+        try: hand_quat = hand_quat.cpu().numpy()
+        except: pass
+        target_pos = hand_pos + self._attach_offset
+        self.attached_object.set_pos(target_pos)
+        self.attached_object.set_quat(hand_quat)
 
-        target_pos = hand_pos + self._attached_offset_world
-        try:
-            # lock both position and orientation
-            if hasattr(self.attached_object, "set_pose"):
-                self.attached_object.set_pose(pos=target_pos, quat=hand_quat)
-            else:
-                self.attached_object.set_pos(target_pos)
-                if hasattr(self.attached_object, "set_quat"):
-                    self.attached_object.set_quat(hand_quat)
-        except Exception as e:
-            print(f"[WARN] Pose sync failed: {e}")
+    def _enable_sync(self):
+        """Register a post-step callback (idempotent)."""
+        if self._sync_cb is not None:
+            return
+        # Try common Genesis callback names; fall back to a simple wrapper
+        if hasattr(self.scene, "add_post_step_callback"):
+            self._sync_cb = self.scene.add_post_step_callback(self._sync_attached_object)
+        elif hasattr(self.scene, "add_post_step_cb"):
+            self._sync_cb = self.scene.add_post_step_cb(self._sync_attached_object)
+        else:
+            # Fallback: wrap scene.step() to always call sync after step
+            orig_step = self.scene.step
+            def step_wrapper(*args, **kwargs):
+                r = orig_step(*args, **kwargs)
+                self._sync_attached_object()
+                return r
+            self.scene.step = step_wrapper
+            self._sync_cb = "wrapped"
+
+    def _disable_sync(self):
+        """Unregister post-step callback (idempotent)."""
+        if self._sync_cb is None:
+            return
+        if self._sync_cb != "wrapped":
+            if hasattr(self.scene, "remove_post_step_callback"):
+                self.scene.remove_post_step_callback(self._sync_cb)
+            elif hasattr(self.scene, "remove_post_step_cb"):
+                self.scene.remove_post_step_cb(self._sync_cb)
+        else:
+            # If we wrapped scene.step(), we can’t easily restore the original here.
+            # Safe to leave wrapped; sync is a no-op when no object is attached.
+            pass
+        self._sync_cb = None
+
 
     # ------------------------------------------------------------------
     # Motion
@@ -184,6 +187,7 @@ class RobotAdapter:
     def move_to_pose(self, qpos_goal, steps=300, ignore_collisions=False):
         """Plan and execute path using OMPL planner."""
         self.print_ee_pose("Before move_to_pose()")
+
         qpos_start = self.get_qpos()
 
         # --- safety fallback: initialize if missing ---
@@ -220,13 +224,11 @@ class RobotAdapter:
             print("[WARN] OMPL returned empty path; executing direct control to goal.")
             self.control_dofs_position(qpos_goal)
             for _ in range(100):
-                self._sync_attached_object()
                 self.scene.step()
             return
 
         for waypoint in path:
             self.control_dofs_position(waypoint)
-            self._sync_attached_object()
             self.scene.step()
 
         self.print_ee_pose("After move_to_pose()")
@@ -280,14 +282,17 @@ class RobotAdapter:
         self.print_ee_pose("Before pick()")
         self.pre_grasp_pose(pos, quat)
         self.open_gripper()
-
+        
+        print("Move to pose called ", pos)  
         qpos_grasp = self.inverse_kinematics(link=self.get_link("hand"), pos=pos, quat=quat)
         self.move_to_pose(qpos_grasp, steps=200)
         self.close_gripper()
 
         # Attach if provided
         if obj is not None:
+            print("[ROBOT][PICK] obj is None?" , obj is None)
             self.attach_object(obj)
+            # print("[ROBOT][PICK] attached:", getattr(self, "attached_object", None))
 
         # Retreat up (auto ignores collisions if attached)
         qpos_retreat = self.inverse_kinematics(
@@ -295,33 +300,94 @@ class RobotAdapter:
             pos=pos + np.array([0, 0, 0.15]),
             quat=quat,
         )
+
+        print("move to retreat pose called ", qpos_retreat)
         self.move_to_pose(qpos_retreat, steps=200)
         self.print_ee_pose("After pick()")
 
     def place(self, pos, quat=np.array([0, 1, 0, 0]), obj: Optional[Any] = None):
         """
-        Move over target → descend → open → retreat.
-        If obj is provided, it will be detached after opening the gripper.
-        If no obj is provided but an object is currently attached, that one is detached.
+        Move above → descend to exact target → detach → open → retreat.
         """
         self.print_ee_pose("Before place()")
 
-        pos_drop = pos.copy()
-        
-        pos_drop[2] += 0.10  # 10 cm above
-        q_drop = self.inverse_kinematics(link=self.get_link("hand"), pos=pos_drop, quat=quat)
-        self.move_to_pose(q_drop, steps=200)
-        time.sleep(0.1)
+        # 1) move 10 cm above target
+        pos_above = pos.copy()
+        # pos_above[1] += 0.011
+        pos_above[2] += 0.075
 
-        # Detach whichever applies
+        # >>> MINIMAL ADD: compensate grasp offset so cube centers correctly
+        off = np.zeros(3)
+        if self.attached_object is not None and self._attach_offset is not None:
+            off = np.array(self._attach_offset, dtype=float)
+        # <<<
+        print("off :", off)
+
+        print("pos :", pos)
+        print("pos above:", pos_above - off)
+        self.print_ee_pose("DEBUG CHECK")
+
+        # >>> MINIMAL CHANGE: aim the HAND at (pos_above - off)
+        q_above = self.inverse_kinematics(link=self.get_link("hand"),
+                                        pos=pos_above - off,  # <— only change
+                                        quat=quat)
+        # <<<
+        print("[DEBUG] GOAL POSITION, QPOS:", q_above)
+        print("[DEBUG]")
+        # ---- Move once ----
+        self.move_to_pose(q_above, steps=200)
+        self.print_ee_pose(" DEBUG CHECK")
+
+        # ---- Iterative XY correction loop ----
+        # ---- Iterative XY correction loop ----
+        max_iters = 3
+        for i in range(max_iters):
+            hand = self.get_link("hand")
+            ee_pos = hand.get_pos().cpu().numpy()
+            target_pos = pos_above - off
+
+            # Compute X and Y errors separately
+            x_err = abs(ee_pos[0] - target_pos[0])
+            y_err = abs(ee_pos[1] - target_pos[1])
+            print(f"[DEBUG][CORRECTION {i}] X err: {x_err:.4f} | Y err: {y_err:.4f}")
+
+            # Stop if both errors are within 5 mm
+            if x_err <= 0.001 and y_err <= 0.001:
+                print("[DEBUG][CORRECTION] Pose aligned within tolerance ✅")
+                break
+
+            # Otherwise, correct position
+            target_pos[1] += 0.001
+            q_fix = self.inverse_kinematics(link=hand, pos=target_pos, quat=quat)
+            self.move_to_pose(q_fix, steps=80)
+
+        self.print_ee_pose("[DEBUG] After XY correction")
+
+
+        # (drop step intentionally skipped per your version)
+
+        # 3) detach first (stop kinematic sync), then open gripper
         if obj is not None and obj is self.attached_object:
             self.detach_object()
         elif obj is None and self.attached_object is not None:
             self.detach_object()
-             
+        # print("[ROBOT][PLACE] detached; attached now:", getattr(self, "attached_object", None))
+
         self.open_gripper()
 
+        # 4) retreat upward to avoid re-contact
+        pos_retreat = pos.copy()
+        pos_retreat[2] += 0.30
+        q_retreat = self.inverse_kinematics(link=self.get_link("hand"), pos=pos_retreat, quat=quat)
+        print("move to pose called ", pos_retreat)
+        self.move_to_pose(q_retreat, steps=200)
+
+        ##ADDED detach and open here
+        
+
         self.print_ee_pose("After place()")
+
+
 
     # ------------------------------------------------------------------
     # Raw object access
