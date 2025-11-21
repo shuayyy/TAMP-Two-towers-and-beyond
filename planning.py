@@ -151,7 +151,26 @@ class PlannerInterface:
         self.attached_object = attached_object
         
         ss.setStateValidityChecker(ob.StateValidityCheckerFn(self._is_ompl_state_valid))
-        ss.setPlanner(getattr(og, planner)(ss.getSpaceInformation()))
+
+
+        # --- Create planner explicitly ---
+        try:
+            planner_obj = getattr(og, planner)(ss.getSpaceInformation())
+            ss.setPlanner(planner_obj)
+            print(f"[DEBUG][Planner] Created planner: {planner}")
+
+            # --- Try to get or set range directly (most reliable method) ---
+            if hasattr(planner_obj, "getRange") and hasattr(planner_obj, "setRange"):
+                current_range = planner_obj.getRange()
+                print(f"[DEBUG][Planner] Default step size (range): {current_range:.4f}")
+                planner_obj.setRange(0.05)
+                print("[DEBUG][Planner] Range set to 0.05")
+            else:
+                print("[DEBUG][Planner] This planner does not support getRange()/setRange().")
+
+        except Exception as e:
+            print(f"[DEBUG][Planner] Could not read/set range: {e}")
+
 
         state_start = ob.State(space)
         state_goal = ob.State(space)
@@ -203,11 +222,9 @@ class PlannerInterface:
         self.robot.set_qpos(qpos_cur)
 
         return waypoints
-    
-    """ TODO : TESTED WHILE IGNORING COLLISIONS ,
-            NEED TO ADD IMPLEMENT WITH COLLISIONS """ 
+
     def _is_ompl_state_valid(self, state):
-        """  
+        """Check if a state is valid, with lightweight debug logging."""
         self.robot.set_qpos(self._ompl_state_to_tensor(state))
         collision_pairs = self.robot.detect_collision()
 
@@ -217,20 +234,37 @@ class PlannerInterface:
         if not self.attached_object:
             return False
 
-        return self.collision_with_attached_object(collision_pairs)
-        """ 
-        return True # IGNORE COLLISIONS FOR NOW, REMOVE LATER
+        # Use filtered logic but skip spammy logs — only print once per plan
+        if not hasattr(self, "_debug_validity_logged"):
+            self._debug_validity_logged = False
+
+        is_valid = self.collision_with_attached_object(collision_pairs)
+
+        if not hasattr(self, "_filter_logged") or not self._filter_logged:
+            if is_valid:
+                print(f"[DEBUG][VALIDITY] Filtering active → ignoring finger↔cube "
+                    f"collisions for cube idx={self.attached_object.idx}.")
+            else:
+                print(f"[DEBUG][VALIDITY] Collision blocked → cube idx={self.attached_object.idx}.")
+            self._filter_logged = True
+
+        return is_valid
+
 
     def collision_with_attached_object(self, collision_pairs):
+        """Allow only finger–attached_object collisions."""
         finger_names = {"left_finger", "right_finger", "hand"}
+
         for a, b in collision_pairs:
             name_a = self.scene.rigid_solver.geoms[a].link.name
             name_b = self.scene.rigid_solver.geoms[b].link.name
+
+            # Allowed contact (finger ↔ attached cube)
             if (name_a in finger_names and b == self.attached_object.idx) or \
-                 (name_b in finger_names and a == self.attached_object.idx):
-                continue
-            return False
-        return True
+            (name_b in finger_names and a == self.attached_object.idx):
+                # print(f"[DEBUG] Skipping finger↔attached cube collision (cube idx={self.attached_object.idx}).")
+                return True  # filter succeeds
+        return False
 
     def _ompl_states_to_tensor_list(self, states):
         tensor_list = []
