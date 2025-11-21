@@ -41,15 +41,32 @@ class RobotAdapter:
         return getattr(self.robot, name)
 
     # Convenience wrappers (stable names)
-    def get_pos(self): return self.robot.get_pos()
-    def set_pos(self, pos): return self.robot.set_pos(pos)
-    def get_qpos(self): return self.robot.get_qpos()
-    def set_qpos(self, qpos): return self.robot.set_qpos(qpos)
-    def control_dofs_position(self, *a, **kw): return self.robot.control_dofs_position(*a, **kw)
-    def control_dofs_force(self, *a, **kw): return self.robot.control_dofs_force(*a, **kw)
-    def get_link(self, *a, **kw): return self.robot.get_link(*a, **kw)
-    def inverse_kinematics(self, *a, **kw): return self.robot.inverse_kinematics(*a, **kw)
-    def detect_collision(self, *a, **kw): return self.robot.detect_collision(*a, **kw)
+    def get_pos(self):
+        return self.robot.get_pos()
+
+    def set_pos(self, pos):
+        return self.robot.set_pos(pos)
+
+    def get_qpos(self):
+        return self.robot.get_qpos()
+
+    def set_qpos(self, qpos):
+        return self.robot.set_qpos(qpos)
+
+    def control_dofs_position(self, *a, **kw):
+        return self.robot.control_dofs_position(*a, **kw)
+
+    def control_dofs_force(self, *a, **kw):
+        return self.robot.control_dofs_force(*a, **kw)
+
+    def get_link(self, *a, **kw):
+        return self.robot.get_link(*a, **kw)
+
+    def inverse_kinematics(self, *a, **kw):
+        return self.robot.inverse_kinematics(*a, **kw)
+
+    def detect_collision(self, *a, **kw):
+        return self.robot.detect_collision(*a, **kw)
 
     # ------------------------------------------------------------------
     # Planning interface bridge
@@ -67,7 +84,8 @@ class RobotAdapter:
         waypoints = planner_interface.plan_path(*args, **kwargs)
         print(f"[DEBUG][RobotAdapter] OMPL returned {len(waypoints)} waypoints")
         return waypoints
-    ###Planning interface 
+
+    # Planning interface
 
     # ------------------------------------------------------------------
     # Debug utils
@@ -111,13 +129,17 @@ class RobotAdapter:
         hand = self.get_link("hand")
         hand_pos = hand.get_pos()
         obj_pos = obj.get_pos()
-        try: hand_pos = hand_pos.cpu().numpy()
-        except: pass
-        try: obj_pos = obj_pos.cpu().numpy()
-        except: pass
+        try:
+            hand_pos = hand_pos.cpu().numpy()
+        except Exception:
+            pass
+        try:
+            obj_pos = obj_pos.cpu().numpy()
+        except Exception:
+            pass
         offset = obj_pos - hand_pos
-        offset[0] = 0.0   # lock X to hand
-        offset[1] = 0.0   # lock Y to hand
+        offset[0] = 0.0  # lock X to hand
+        offset[1] = 0.0  # lock Y to hand
         self._attach_offset = offset
 
         self._enable_sync()
@@ -130,7 +152,6 @@ class RobotAdapter:
         self._attach_offset = None
         print("[ROBOT][DETACH] detached")
 
-
     def _sync_attached_object(self):
         """Keep the attached object rigidly at the hand each sim step."""
         if self.attached_object is None or self._attach_offset is None:
@@ -138,10 +159,14 @@ class RobotAdapter:
         hand = self.get_link("hand")
         hand_pos = hand.get_pos()
         hand_quat = hand.get_quat()
-        try: hand_pos = hand_pos.cpu().numpy()
-        except: pass
-        try: hand_quat = hand_quat.cpu().numpy()
-        except: pass
+        try:
+            hand_pos = hand_pos.cpu().numpy()
+        except Exception:
+            pass
+        try:
+            hand_quat = hand_quat.cpu().numpy()
+        except Exception:
+            pass
         target_pos = hand_pos + self._attach_offset
         self.attached_object.set_pos(target_pos)
         self.attached_object.set_quat(hand_quat)
@@ -158,6 +183,7 @@ class RobotAdapter:
         else:
             # Fallback: wrap scene.step() to always call sync after step
             orig_step = self.scene.step
+
             def step_wrapper(*args, **kwargs):
                 r = orig_step(*args, **kwargs)
                 self._sync_attached_object()
@@ -180,7 +206,6 @@ class RobotAdapter:
             pass
         self._sync_cb = None
 
-
     # ------------------------------------------------------------------
     # Motion
     # ------------------------------------------------------------------
@@ -189,19 +214,7 @@ class RobotAdapter:
         self.print_ee_pose("Before move_to_pose()")
 
         qpos_start = self.get_qpos()
-
-        # --- safety fallback: initialize if missing ---
-        if not hasattr(self, "attached_geom_indices"):
-            self.attached_geom_indices = []
-
-        # --- auto ignore heuristic ---
-        fingers = qpos_start[-2:]
-        if hasattr(fingers, "cpu"):  # convert torch.Tensor → numpy
-            fingers = fingers.detach().cpu().numpy()
-        gripper_closed = np.all(fingers < 0.01)
         print(f"[DEBUG] attached_object: {self.attached_object}")
-        # auto_ignore = (getattr(self, "attached_object", None) is not None)  #or gripper_closed
-        # use_ignore = ignore_collisions or auto_ignore
         auto_ignore = False
         use_ignore = ignore_collisions
         print(f"[DEBUG] move_to_pose(): ignore_collisions={ignore_collisions}, auto_ignore={auto_ignore} => use_ignore={use_ignore}")
@@ -210,7 +223,6 @@ class RobotAdapter:
             print("[DEBUG] Ignoring collisions during motion planning (grasp context).")
             from planning import PlannerInterface
             planner_interface = PlannerInterface(self.robot, self.scene)
-            # planner_interface._is_ompl_state_valid = lambda s: True
             path = planner_interface.plan_path(
                 qpos_goal=qpos_goal,
                 qpos_start=qpos_start,
@@ -218,7 +230,11 @@ class RobotAdapter:
                 attached_object=self.attached_object,
             )
         else:
-            path = self.plan_path(qpos_goal=qpos_goal, num_waypoints=steps,attached_object=self.attached_object,)
+            path = self.plan_path(
+                qpos_goal=qpos_goal,
+                num_waypoints=steps,
+                attached_object=self.attached_object,
+            )
 
         if len(path) == 0:
             print("[WARN] OMPL returned empty path; executing direct control to goal.")
@@ -232,8 +248,6 @@ class RobotAdapter:
             self.scene.step()
 
         self.print_ee_pose("After move_to_pose()")
-        time.sleep(0.1)
-
 
     def pre_grasp_pose(self, pos, quat, approach_dir=np.array([0, 0, 1]), offset=0.10, steps=300):
         """
@@ -282,17 +296,14 @@ class RobotAdapter:
         self.print_ee_pose("Before pick()")
         self.pre_grasp_pose(pos, quat)
         self.open_gripper()
-        
-        print("Move to pose called ", pos)  
+
         qpos_grasp = self.inverse_kinematics(link=self.get_link("hand"), pos=pos, quat=quat)
         self.move_to_pose(qpos_grasp, steps=200)
         self.close_gripper()
 
         # Attach if provided
         if obj is not None:
-            print("[ROBOT][PICK] obj is None?" , obj is None)
             self.attach_object(obj)
-            # print("[ROBOT][PICK] attached:", getattr(self, "attached_object", None))
 
         # Retreat up (auto ignores collisions if attached)
         qpos_retreat = self.inverse_kinematics(
@@ -307,38 +318,39 @@ class RobotAdapter:
 
     def place(self, pos, quat=np.array([0, 1, 0, 0]), obj: Optional[Any] = None):
         """
-        Move above → descend to exact target → detach → open → retreat.
+        Places the currently attached object at the given position.
+        Moves slightly above the target, compensates grasp offset,
+        performs fine XY correction, detaches, opens gripper, and retreats.
         """
         self.print_ee_pose("Before place()")
 
-        # 1) move 10 cm above target
+        # 1) move 7.5 cm above target
         pos_above = pos.copy()
-        # pos_above[1] += 0.011
         pos_above[2] += 0.075
 
-        # >>> MINIMAL ADD: compensate grasp offset so cube centers correctly
+        # compensate grasp offset so cube centers correctly
         off = np.zeros(3)
         if self.attached_object is not None and self._attach_offset is not None:
             off = np.array(self._attach_offset, dtype=float)
-        # <<<
-        print("off :", off)
 
+        print("offset :", off)
         print("pos :", pos)
         print("pos above:", pos_above - off)
         self.print_ee_pose("DEBUG CHECK")
 
-        # >>> MINIMAL CHANGE: aim the HAND at (pos_above - off)
-        q_above = self.inverse_kinematics(link=self.get_link("hand"),
-                                        pos=pos_above - off,  # <— only change
-                                        quat=quat)
-        # <<<
+        # aim the HAND at (pos_above - off)
+        q_above = self.inverse_kinematics(
+            link=self.get_link("hand"),
+            pos=pos_above - off,
+            quat=quat,
+        )
+
         print("[DEBUG] GOAL POSITION, QPOS:", q_above)
         print("[DEBUG]")
         # ---- Move once ----
         self.move_to_pose(q_above, steps=200)
-        self.print_ee_pose(" DEBUG CHECK")
+        self.print_ee_pose("DEBUG CHECK")
 
-        # ---- Iterative XY correction loop ----
         # ---- Iterative XY correction loop ----
         max_iters = 3
         for i in range(max_iters):
@@ -363,15 +375,11 @@ class RobotAdapter:
 
         self.print_ee_pose("[DEBUG] After XY correction")
 
-
-        # (drop step intentionally skipped per your version)
-
         # 3) detach first (stop kinematic sync), then open gripper
         if obj is not None and obj is self.attached_object:
             self.detach_object()
         elif obj is None and self.attached_object is not None:
             self.detach_object()
-        # print("[ROBOT][PLACE] detached; attached now:", getattr(self, "attached_object", None))
 
         self.open_gripper()
 
@@ -381,13 +389,7 @@ class RobotAdapter:
         q_retreat = self.inverse_kinematics(link=self.get_link("hand"), pos=pos_retreat, quat=quat)
         print("move to pose called ", pos_retreat)
         self.move_to_pose(q_retreat, steps=200)
-
-        ##ADDED detach and open here
-        
-
         self.print_ee_pose("After place()")
-
-
 
     # ------------------------------------------------------------------
     # Raw object access
