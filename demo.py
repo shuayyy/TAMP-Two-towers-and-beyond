@@ -103,7 +103,7 @@ if __name__ == "__main__":
     preds = abstract_state(scene, franka, BlocksState)
     visualize_predicates(preds)
 
-    plan = plan_symbolic(preds, goal_id=1)
+    plan = plan_symbolic(preds, goal_id=2)
 
     print("\n[TASK PLAN]")
     for i, step in enumerate(plan):

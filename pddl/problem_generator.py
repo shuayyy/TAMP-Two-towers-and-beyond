@@ -33,15 +33,16 @@ def get_goal_predicates(goal_id: int) -> Set[Tuple]:
         }
 
     elif goal_id == 2:
-        # TODO: fill in once your 5-block tower spec is finalized
-        # Example skeleton:
-        # return {
-        #   ("ontable", "something"),
-        #   ("on", "top", "mid"),
-        #   ...
-        #   ("handempty",),
-        # }
-        raise NotImplementedError("Goal 2 not defined yet")
+        # Goal 2: 5-block tower (top→bottom: M-Y-B-R-G)
+        return {
+            ("ontable", "g"),
+            ("on", "r", "g"),
+            ("on", "b", "r"),
+            ("on", "y", "b"),
+            ("on", "m", "y"),
+            ("clear", "m"),
+            ("handempty",),
+        }
 
     else:
         raise ValueError(f"Unknown goal_id: {goal_id}")
