@@ -28,12 +28,11 @@ def get_goal_predicates(goal_id: int) -> Set[Tuple]:
             ("on", "m", "c"),
             ("on", "y", "m"),
             ("clear", "y"),
-
             ("handempty",),
         }
 
     elif goal_id == 2:
-        # Goal 2: 5-block tower (top→bottom: M-Y-B-R-G)
+        # Goal 2: 6-block tower (top→bottom: M-Y-B-R-G-C)
         return {
             ("ontable", "g"),
             ("on", "r", "g"),
@@ -43,7 +42,21 @@ def get_goal_predicates(goal_id: int) -> Set[Tuple]:
             ("clear", "m"),
             ("handempty",),
         }
-
+    elif goal_id == 3:
+        # Goal 3: (BONUS) 6-block tower (top→bottom: M-Y-B-R-G-C)
+        return {
+            ("ontable", "c"),
+            ("on", "g", "c"),
+            ("on", "r", "g"),
+            ("on", "b", "r"),
+            ("on", "y", "b"),
+            ("on", "m", "y"),
+            ("clear", "m"),
+            ("handempty",),
+        }
+    elif goal_id == 4:
+        # Goal 4: Special Structure (not specified yet)
+        raise NotImplementedError("Goal 4 predicates are not defined.")
     else:
         raise ValueError(f"Unknown goal_id: {goal_id}")
 

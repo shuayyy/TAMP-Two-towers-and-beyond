@@ -67,22 +67,26 @@ def get_gripper_state(robot: Any) -> Tuple[np.ndarray, bool]:
     pos = hand_link.get_pos()
     try:
         gripper_pos = pos.cpu().numpy()
-    except:
+    except Exception:
         gripper_pos = np.array(pos, dtype=float)
-
 
     # Get gripper joint positions (last 2 DOFs are gripper fingers)
     qpos = robot.get_qpos()
-    try:
-        qpos_cpu = qpos.cpu().numpy()
-    except:
+    if hasattr(qpos, "cpu"):
+        try:
+            qpos_cpu = qpos.detach().cpu().numpy()
+        except Exception:
+            qpos_cpu = np.array(qpos, dtype=float)
+    else:
         qpos_cpu = np.array(qpos, dtype=float)
 
-    gripper_width = qpos_cpu[-2] + qpos_cpu[-1]# Sum of both finger positions
+    # Defensive: ensure we have at least two values for fingers
+    if qpos_cpu.size >= 2:
+        gripper_width = float(qpos_cpu[-2] + qpos_cpu[-1])
+    else:
+        gripper_width = float(np.sum(qpos_cpu)) if qpos_cpu.size > 0 else 0.0
 
     # Gripper is considered closed if width is small
-    # Open: 0.04 + 0.04 = 0.08
-    # Closed/Grasping: ~0.01 + 0.01 = 0.02
     is_closed = gripper_width < 0.04
 
     return gripper_pos, is_closed
@@ -160,32 +164,23 @@ def is_clear(block_name: str, all_block_positions: Dict[str, np.ndarray]) -> boo
 
     return True
 
-
-def is_holding(block_name: str, gripper_pos: np.ndarray,
-               block_pos: np.ndarray, gripper_closed: bool,
-               threshold: float = HOLDING_THRESHOLD) -> bool:
-    """Check if the robot gripper is holding a specific block.
-
-    Args:
-        block_name: Name of block to check
-        gripper_pos: [x, y, z] position of gripper
-        block_pos: [x, y, z] position of the block
-        gripper_closed: True if gripper is closed
-        threshold: Distance tolerance
-
-    Returns:
-        True if gripper is holding the block, False otherwise
-
-    Logic:
-        - Gripper must be closed
-        - Gripper position must match block position (within threshold)
+def is_holding(block_name: str,
+               robot: Any,
+               blocks_state: Dict[str, Any]) -> bool:
     """
-    if not gripper_closed:
-        return False
+    Ground-truth holding check using RobotAdapter.attached_object.
+    """
+    attached = robot.attached_object
+    block_obj = blocks_state[block_name]
 
-    # Check if gripper and block are at the same position
-    distance = np.linalg.norm(gripper_pos - block_pos)
-    return distance < threshold
+    is_holding_block = (attached is block_obj)
+
+    print(f"[HOLDING] block={block_name}, "
+          f"attached_obj={attached}, "
+          f"is_holding={is_holding_block}")
+
+    return is_holding_block
+
 
 
 def is_handempty(gripper_pos: np.ndarray, gripper_closed: bool,
@@ -263,7 +258,7 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any]) -> Set[
             predicates.add(("clear", block_name))
 
         # Check if robot is holding this block
-        if is_holding(block_name, gripper_pos, block_pos, gripper_closed):
+        if is_holding(block_name, robot, blocks_state):
             predicates.add(("holding", block_name))
 
         # Check "on" relationships with all other blocks
@@ -276,7 +271,7 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any]) -> Set[
                 predicates.add(("on", block_name, other_name))
 
     # Check if hand is empty
-    if is_handempty(gripper_pos, gripper_closed, block_positions):
+    if robot.attached_object is None:
         predicates.add(("handempty",))
 
     return predicates

@@ -100,25 +100,32 @@ if __name__ == "__main__":
 
     print("[INFO] Scene + robot ready.\n")
 
-    preds = abstract_state(scene, franka, BlocksState)
-    visualize_predicates(preds)
+    for step_idx in range(20):  
+        preds = abstract_state(scene, franka, BlocksState)
+        visualize_predicates(preds)
+        print_block_positions(BlocksState, label=f"[BLOCK POS AFTER STEP {step_idx}]")
 
-    plan = plan_symbolic(preds, goal_id=2)
+        try:
+            plan = plan_symbolic(preds, goal_id=1)
+        except RuntimeError as e:
+            print(f"[task_planner] ERROR during planning: {e}")
+            break
 
-    print("\n[TASK PLAN]")
-    for i, step in enumerate(plan):
-        print(f"  {i}: {step}")
+        if not plan:
+            print("[INFO] Planner returned empty plan — assuming goal reached or unsolvable.")
+            break
 
-    print_block_positions(BlocksState, label="[INIT BLOCK POS]")
+        print("\n[TASK PLAN]")
+        for i, step in enumerate(plan):
+            print(f"  {i}: {step}")
 
-    for action in plan:
-        print(f"\n[EXEC] ▶ {action}")
-        execute_action(franka, scene, BlocksState, action)
+        # 3) Execute ONLY the first action of the new plan
+        action = plan[0]
+        print(f"\n[EXEC-STEP {step_idx}.0] ▶ {action}")
+        ok = execute_action(franka, scene, BlocksState, action)
+        if not ok:
+            print(f"[EXEC] Action failed: {action}. Stopping execution loop.")
+            break
 
         for _ in range(80):
             scene.step()
-
-    print("\n[INFO] Execution complete. Observing for 30 seconds...")
-    t_end = time.time() + 30.0
-    while time.time() < t_end:
-        scene.step()
