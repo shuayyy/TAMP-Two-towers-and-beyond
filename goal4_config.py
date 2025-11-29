@@ -14,11 +14,11 @@ import numpy as np
 BLOCK_SIZE = 0.04  # 4cm cubes
 SPACING = 0.04     # 4cm between block centers - blocks touching
 
-# Base coordinates for structures
+# Base coordinates for structures - BUILD ADJACENT
 YELLOW_BASE_X = 0.5  # Yellow cross center position
 YELLOW_BASE_Y = 0.0
-GREEN_BASE_X = 0.7   # Green square offset position
-GREEN_BASE_Y = 0.3
+GREEN_BASE_X = 0.5   # Green square ADJACENT to yellow (same X)
+GREEN_BASE_Y = 0.15  # Offset in Y to be next to yellow cross
 
 # Position tolerance for detecting if block is at a position
 POSITION_XY_THRESHOLD = 0.015  # 1.5cm tolerance in XY plane

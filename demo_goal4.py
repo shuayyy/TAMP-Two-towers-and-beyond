@@ -104,6 +104,29 @@ def execute_action(franka, scene, BlocksState, action):
         franka.pick(pos, obj=obj)
         return True
 
+    elif name == "PICKUP-AT":
+        # Goal 4: Pick up block from specific position
+        blk = args[0]
+        pos_name = args[1]
+        obj = BlocksState[blk]
+        pos = obj.get_pos().cpu().numpy()
+
+        print(f"[EXEC][PICKUP-AT] {blk} from position {pos_name} @ {pos}")
+        franka.pick(pos, obj=obj)
+        return True
+
+    elif name == "UNSTACK-AT":
+        # Goal 4: Unstack block from another at specific position
+        blk = args[0]
+        bottom_blk = args[1]
+        pos_name = args[2]
+        obj = BlocksState[blk]
+        pos = obj.get_pos().cpu().numpy()
+
+        print(f"[EXEC][UNSTACK-AT] {blk} from {bottom_blk} at position {pos_name} @ {pos}")
+        franka.pick(pos, obj=obj)
+        return True
+
     elif name == "PUTDOWN-AT":
         # Goal 4: Place block at specific position
         blk = args[0]
@@ -216,19 +239,30 @@ if __name__ == "__main__":
         if len(plan) > 5:
             print(f"  ... and {len(plan) - 5} more")
 
-        # 3. Execute ONLY the first action
-        action = plan[0]
-        print(f"\n[EXEC-STEP {step_idx}] Executing: {action}")
-        ok = execute_action(franka, scene, BlocksState, action)
+        # 3. Execute batch of actions (up to 10) before replanning
+        ACTIONS_PER_BATCH = 10
+        actions_to_execute = plan[:ACTIONS_PER_BATCH]
 
-        if not ok:
-            print(f"\n[EXEC] ❌ Action failed: {action}")
-            print("[INFO] Stopping execution loop.")
-            break
+        print(f"\n[BATCH EXECUTION] Executing {len(actions_to_execute)} actions before replanning...")
 
-        # Let physics settle
-        for _ in range(80):
-            scene.step()
+        for action_idx, action in enumerate(actions_to_execute):
+            print(f"\n[EXEC-STEP {step_idx}.{action_idx}] Executing: {action}")
+            ok = execute_action(franka, scene, BlocksState, action)
+
+            if not ok:
+                print(f"\n[EXEC] ❌ Action failed: {action}")
+                print("[INFO] Stopping execution loop.")
+                break
+
+            # Let physics settle (reduced for speed)
+            for _ in range(20):
+                scene.step()
+        else:
+            # All actions in batch succeeded, continue to next iteration
+            continue
+
+        # If we broke out of action loop (failure), break outer loop too
+        break
 
     else:
         # Reached MAX_STEPS

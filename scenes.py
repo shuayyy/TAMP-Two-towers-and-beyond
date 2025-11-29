@@ -184,16 +184,17 @@ def create_scene_goal4_initial() -> Tuple[Any, Any, Dict[str, Any]]:
     blocks_state: Dict[str, Any] = {}
 
     # ===== CREATE 12 YELLOW BLOCKS (scattered) =====
-    # Use a wider grid pattern with larger random noise for more scattered positions
+    # Place scattered blocks AWAY from build zone (build zone is x=0.5-0.8)
+    # Use x=0.3-0.45 range (in front) to avoid conflicts
     yellow_base_positions = [
+        (0.30, -0.15), (0.30, 0.05), (0.30, 0.25), (0.30, 0.45),
+        (0.35, -0.15), (0.35, 0.05), (0.35, 0.25), (0.35, 0.45),
         (0.40, -0.15), (0.40, 0.05), (0.40, 0.25), (0.40, 0.45),
-        (0.55, -0.15), (0.55, 0.05), (0.55, 0.25), (0.55, 0.45),
-        (0.70, -0.15), (0.70, 0.05), (0.70, 0.25), (0.70, 0.45),
     ]
 
     for i, (base_x, base_y) in enumerate(yellow_base_positions, start=1):
         block_name = f"y{i}"
-        pos = _rand_xy((base_x, base_y, 0.02), noise=0.06)
+        pos = _rand_xy((base_x, base_y, 0.02), noise=0.04)  # Reduced noise to keep away
 
         cube = scene.add_entity(
             gs.morphs.Box(size=(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE), pos=pos),
@@ -202,14 +203,15 @@ def create_scene_goal4_initial() -> Tuple[Any, Any, Dict[str, Any]]:
         blocks_state[block_name] = cube
 
     # ===== CREATE 6 GREEN BLOCKS (scattered) =====
+    # Place green blocks on the sides
     green_base_positions = [
-        (0.45, -0.30), (0.60, -0.30), (0.75, -0.30),
-        (0.45, 0.60), (0.60, 0.60), (0.75, 0.60),
+        (0.35, -0.35), (0.40, -0.35), (0.45, -0.35),
+        (0.35, 0.60), (0.40, 0.60), (0.45, 0.60),
     ]
 
     for i, (base_x, base_y) in enumerate(green_base_positions, start=1):
         block_name = f"g{i}"
-        pos = _rand_xy((base_x, base_y, 0.02), noise=0.06)
+        pos = _rand_xy((base_x, base_y, 0.02), noise=0.04)  # Reduced noise
 
         cube = scene.add_entity(
             gs.morphs.Box(size=(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE), pos=pos),
