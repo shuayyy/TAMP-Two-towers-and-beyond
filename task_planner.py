@@ -24,6 +24,14 @@ from pathlib import Path
 
 from pddl.problem_generator import make_problem_pddl, DOMAIN_FILE
 
+# Domain file mapping for different goals
+def get_domain_file(goal_id: int) -> str:
+    """Return the appropriate domain file for the given goal_id."""
+    if goal_id == 4:
+        return str(Path("pddl") / "domain_blocks_goal4.pddl")
+    else:
+        return DOMAIN_FILE
+
 
 Action = Tuple[str, ...]  # e.g. ("STACK", "r", "g")
 
@@ -122,12 +130,16 @@ def parse_plan(plan_text: str) -> List[Action]:
         (stack r g)
         (pickup y)
         (stack y m)
-        ...
+
+        Goal 4 actions:
+        (putdown-at y1 pos_r1_c2_bottom)
+        (stack-at y3 y1 pos_r1_c2_bottom)
 
     We:
       - ignore empty lines and comment lines starting with ';'
       - expect each non-empty line to contain exactly one '(action ...)' term
-      - action name -> upper-case, args -> lower-case
+      - action name -> upper-case (PUTDOWN-AT), args -> lower-case
+      - supports variable-length arguments for Goal 4 position actions
     """
     plan: List[Action] = []
 
@@ -192,13 +204,16 @@ def plan_symbolic(current_predicates: Set[Tuple],
         problem_name=problem_name,
     )
 
-    print(f"[task_planner] Using DOMAIN:  {DOMAIN_FILE}")
+    # 2) Get the appropriate domain file for this goal
+    domain_file = get_domain_file(goal_id)
+
+    print(f"[task_planner] Using DOMAIN:  {domain_file}")
     print(f"[task_planner] Using PROBLEM: {problem_file}")
 
-    # 2) Run pyperplan (extracts plan from stdout or .soln) and read plan text
-    plan_text = run_pyperplan(DOMAIN_FILE, problem_file)
+    # 3) Run pyperplan (extracts plan from stdout or .soln) and read plan text
+    plan_text = run_pyperplan(domain_file, problem_file)
 
-    # 3) Parse the plan text
+    # 4) Parse the plan text
     plan = parse_plan(plan_text)
 
     if not plan:
