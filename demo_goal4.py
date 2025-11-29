@@ -149,14 +149,16 @@ def execute_action(franka, scene, BlocksState, action):
 
     elif name == "STACK-AT":
         # Goal 4: Stack block on another at specific position
+        # New signature: (stack-at ?x ?y ?p-bottom ?p-top)
         block_top = args[0]
         block_bottom = args[1]
-        pos_name = args[2]
+        pos_bottom = args[2]  # Position of bottom block
+        pos_top = args[3]     # Position where top block will be
 
         top_obj = BlocksState[block_top]
         bottom_obj = BlocksState[block_bottom]
 
-        # Get bottom block's actual position (should be at pos_name)
+        # Get bottom block's actual position (should be at pos_bottom)
         bottom_link = bottom_obj.links[0]
         bottom_geom = bottom_link.geoms[0]
         bottom_pos = bottom_geom.get_pos().cpu().numpy()
@@ -165,7 +167,7 @@ def execute_action(franka, scene, BlocksState, action):
         place_pos = bottom_pos.copy()
         place_pos[2] += BLOCK_SIZE
 
-        print(f"[EXEC][STACK-AT] {block_top} on {block_bottom} at {pos_name} → {place_pos}")
+        print(f"[EXEC][STACK-AT] {block_top} on {block_bottom} at bottom={pos_bottom}, top={pos_top} → {place_pos}")
         franka.place(place_pos, obj=top_obj)
         return True
 

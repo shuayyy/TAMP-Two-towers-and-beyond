@@ -216,12 +216,76 @@ def make_problem_pddl(current_predicates: Set[Tuple],
         # Add position-free predicates to init for all goal positions
         position_free_preds = [(("position-free", p),) for p in positions]
 
+        # Add table-position predicates for positions where blocks can be placed on table
+        # Only "_bottom" positions are table positions; "_top" positions can only be reached by stacking
+        table_position_preds = [(("table-position", p),) for p in positions if "bottom" in p]
+
+        # Add position-above facts for vertically aligned positions
+        # For each "_bottom" position, there's a corresponding "_top" position directly above it
+        position_above_preds = []
+        for pos in positions:
+            if pos.endswith("_bottom"):
+                # Find corresponding top position
+                top_pos = pos.replace("_bottom", "_top")
+                if top_pos in positions:
+                    position_above_preds.append((("position-above", top_pos, pos),))
+
+        # Add allowed-position constraints based on goal
+        # Yellow blocks (y1-y12) with their designated positions
+        yellow_allowed = {
+            "y1": "pos_r1_c2_bottom",
+            "y2": "pos_r1_c3_bottom",
+            "y3": "pos_r1_c2_top",
+            "y4": "pos_r1_c3_top",
+            "y5": "pos_r2_c1_bottom",
+            "y6": "pos_r2_c4_bottom",
+            "y7": "pos_r2_c1_top",
+            "y8": "pos_r2_c4_top",
+            "y9": "pos_r3_c2_bottom",
+            "y10": "pos_r3_c3_bottom",
+            "y11": "pos_r3_c2_top",
+            "y12": "pos_r3_c3_top",
+        }
+
+        # Green blocks (g1-g6) with their designated positions
+        green_allowed = {
+            "g1": "pos_front_center_bottom",
+            "g2": "pos_front_right_bottom",
+            "g3": "pos_middle_left_bottom",
+            "g4": "pos_middle_right_bottom",
+            "g5": "pos_back_left_bottom",
+            "g6": "pos_back_center_bottom",
+        }
+
+        # Add allowed-position facts based on goal_id
+        allowed_position_preds = []
+        if goal_id == 41:
+            # Yellow tower only
+            for block, pos in yellow_allowed.items():
+                allowed_position_preds.append((("allowed-position", block, pos),))
+        elif goal_id == 42:
+            # Green square only
+            for block, pos in green_allowed.items():
+                allowed_position_preds.append((("allowed-position", block, pos),))
+        elif goal_id == 4:
+            # Both structures
+            for block, pos in yellow_allowed.items():
+                allowed_position_preds.append((("allowed-position", block, pos),))
+            for block, pos in green_allowed.items():
+                allowed_position_preds.append((("allowed-position", block, pos),))
+
         # Update positions string
         positions_str = " ".join(positions) + " - position"
         objects_str = f"{blocks_str}\n    {positions_str}"
 
         init_predicates = current_predicates.union(
             set(p[0] for p in position_free_preds)
+        ).union(
+            set(p[0] for p in allowed_position_preds)
+        ).union(
+            set(p[0] for p in table_position_preds)
+        ).union(
+            set(p[0] for p in position_above_preds)
         )
 
     else:

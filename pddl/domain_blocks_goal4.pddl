@@ -10,6 +10,9 @@
     (handempty)
     (at-position ?x - block ?p - position)
     (position-free ?p - position)
+    (allowed-position ?x - block ?p - position)  ; Constraint: block X can only be placed at position P
+    (table-position ?p - position)               ; Marks positions where blocks can be placed on table
+    (position-above ?p-top - position ?p-bottom - position)  ; P-top is directly above P-bottom
   )
 
   ;; Simple pickup - ignores positions
@@ -34,6 +37,8 @@
     :precondition (and
       (holding ?x)
       (position-free ?p)
+      (allowed-position ?x ?p)  ; Only allow placing block at its designated position
+      (table-position ?p)        ; Only allow placing on table positions (not stacking positions)
     )
     :effect (and
       (ontable ?x)
@@ -63,12 +68,16 @@
   )
 
   ;; Stack on block at position
+  ;; ?p-bottom is the position of the bottom block ?y
+  ;; ?p-top is the position where the top block ?x will be
   (:action stack-at
-    :parameters (?x - block ?y - block ?p - position)
+    :parameters (?x - block ?y - block ?p-bottom - position ?p-top - position)
     :precondition (and
       (holding ?x)
       (clear ?y)
-      (at-position ?y ?p)
+      (at-position ?y ?p-bottom)
+      (allowed-position ?x ?p-top)  ; Top block must be allowed at its stacking position
+      (position-above ?p-top ?p-bottom)  ; Top position must be directly above bottom position
     )
     :effect (and
       (on ?x ?y)
@@ -76,6 +85,8 @@
       (not (clear ?y))
       (handempty)
       (not (holding ?x))
+      (at-position ?x ?p-top)       ; Top block is now at the top position
+      (not (position-free ?p-top))
     )
   )
 )
