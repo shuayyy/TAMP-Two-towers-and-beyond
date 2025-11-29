@@ -280,8 +280,8 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any],
     if robot.attached_object is None:
         predicates.add(("handempty",))
 
-    # Goal 4: Add position predicates
-    if goal_id == 4:
+    # Goal 4 (and sub-goals 41, 42): Add position predicates
+    if goal_id in [4, 41, 42]:
         try:
             from goal4_config import find_block_position, get_all_position_names
 

@@ -27,7 +27,7 @@ from pddl.problem_generator import make_problem_pddl, DOMAIN_FILE
 # Domain file mapping for different goals
 def get_domain_file(goal_id: int) -> str:
     """Return the appropriate domain file for the given goal_id."""
-    if goal_id == 4:
+    if goal_id in [4, 41, 42]:
         return str(Path("pddl") / "domain_blocks_goal4.pddl")
     else:
         return DOMAIN_FILE

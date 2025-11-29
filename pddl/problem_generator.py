@@ -71,19 +71,9 @@ def get_goal_predicates(goal_id: int) -> Set[Tuple]:
             ("clear", "m"),
             ("handempty",),
         }
-    elif goal_id == 4:
-        # Goal 4: Two structures
-        # Structure 1: Yellow cross/plus (12 blocks) - 3D cross shape with 2 layers
-        # Structure 2: Green hollow square (6 blocks) - all at z=bottom
-
+    elif goal_id == 41:
+        # Goal 4.1: Yellow cross/plus tower only (sub-goal)
         goal_preds = set()
-
-        # ===== YELLOW CROSS/PLUS TOWER (12 blocks) =====
-        # 3D cross shape: 3 rows × 4 columns × 2 layers
-        # Pattern per layer (6 cubes):
-        #   r1:      [c2][c3]
-        #   r2: [c1]        [c4]
-        #   r3:      [c2][c3]
 
         # Row 1 (front): 2 blocks at center columns [c2][c3]
         goal_preds.add(("at-position", "y1", "pos_r1_c2_bottom"))
@@ -119,10 +109,12 @@ def get_goal_predicates(goal_id: int) -> Set[Tuple]:
         for block in ["y3", "y4", "y7", "y8", "y11", "y12"]:
             goal_preds.add(("clear", block))
 
-        # ===== GREEN HOLLOW SQUARE (6 blocks) =====
-        # All at z=bottom, forming a ring with center empty
-        # Positions: (front, center), (front, right), (middle, left),
-        #            (middle, right), (back, left), (back, center)
+        goal_preds.add(("handempty",))
+        return goal_preds
+
+    elif goal_id == 42:
+        # Goal 4.2: Green hollow square only (sub-goal)
+        goal_preds = set()
 
         goal_preds.add(("at-position", "g1", "pos_front_center_bottom"))
         goal_preds.add(("ontable", "g1"))
@@ -148,9 +140,12 @@ def get_goal_predicates(goal_id: int) -> Set[Tuple]:
         goal_preds.add(("ontable", "g6"))
         goal_preds.add(("clear", "g6"))
 
-        # Hand must be empty
         goal_preds.add(("handempty",))
+        return goal_preds
 
+    elif goal_id == 4:
+        # Goal 4: Both structures (combination of 41 + 42)
+        goal_preds = get_goal_predicates(41).union(get_goal_predicates(42))
         return goal_preds
     else:
         raise ValueError(f"Unknown goal_id: {goal_id}")
@@ -185,7 +180,7 @@ def make_problem_pddl(current_predicates: Set[Tuple],
     goal_predicates = get_goal_predicates(goal_id)
 
     # Determine domain and objects based on goal_id
-    if goal_id == 4:
+    if goal_id in [4, 41, 42]:
         domain_name = "blocks-goal4"
         domain_file_name = "domain_blocks_goal4.pddl"
 
