@@ -46,12 +46,14 @@ def run_pyperplan(domain_file: str, problem_file: str) -> str:
     try:
         # Import pyperplan modules
         from pyperplan import planner
-        from pyperplan.search import breadth_first_search
-        
-        print("[task_planner] Running pyperplan via Python API...")
-        
-        # Use pyperplan's search_plan function which returns a list of operators
-        plan = planner.search_plan(domain_file, problem_file, breadth_first_search, None)
+        from pyperplan.search import enforced_hillclimbing_search
+        from pyperplan.heuristics.relaxation import hFFHeuristic
+
+        print("[task_planner] Running pyperplan with Enforced Hill-Climbing (fast)...")
+
+        # Use Enforced Hill-Climbing for faster planning on large problems
+        # This is much faster than A* for Goal 4 with 18 blocks
+        plan = planner.search_plan(domain_file, problem_file, enforced_hillclimbing_search, hFFHeuristic)
         
         if plan is None:
             raise RuntimeError("Pyperplan returned no plan (unsolvable problem?)")
