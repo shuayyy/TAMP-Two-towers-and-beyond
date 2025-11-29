@@ -220,7 +220,22 @@ def make_problem_pddl(current_predicates: Set[Tuple],
 
         # Add position-free predicates to init for all positions
         position_free_preds = [(("position-free", p),) for p in positions]
-        init_predicates = current_predicates.union(set(p[0] for p in position_free_preds))
+
+        # Add scattered predicates for all blocks that don't have at-position
+        # Check which blocks are at positions in current_predicates
+        blocks_at_positions = set()
+        for pred in current_predicates:
+            if pred[0] == "at-position":
+                blocks_at_positions.add(pred[1])
+
+        # All blocks not at positions are scattered
+        scattered_preds = [(("scattered", b),) for b in GOAL4_ALL_BLOCKS if b not in blocks_at_positions]
+
+        init_predicates = current_predicates.union(
+            set(p[0] for p in position_free_preds)
+        ).union(
+            set(p[0] for p in scattered_preds)
+        )
 
     else:
         domain_name = "blocks"

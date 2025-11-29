@@ -285,8 +285,9 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any],
         try:
             from goal4_config import find_block_position, get_all_position_names
 
-            # Track which positions are occupied
+            # Track which positions are occupied and which blocks are at positions
             occupied_positions = set()
+            blocks_at_positions = set()
 
             # Check each block's position
             for block_name in blocks_state.keys():
@@ -296,12 +297,18 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any],
                 if pos_name is not None:
                     predicates.add(("at-position", block_name, pos_name))
                     occupied_positions.add(pos_name)
+                    blocks_at_positions.add(block_name)
 
             # Mark free positions
             all_positions = get_all_position_names()
             for pos_name in all_positions:
                 if pos_name not in occupied_positions:
                     predicates.add(("position-free", pos_name))
+
+            # Mark scattered blocks (blocks NOT at any goal position)
+            for block_name in blocks_state.keys():
+                if block_name not in blocks_at_positions:
+                    predicates.add(("scattered", block_name))
 
         except ImportError:
             # Goal 4 config not available, skip position predicates
