@@ -209,7 +209,8 @@ def is_handempty(gripper_pos: np.ndarray, gripper_closed: bool,
     return True
 
 
-def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any]) -> Set[Tuple]:
+def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any],
+                   goal_id: int = 1) -> Set[Tuple]:
     """Convert continuous scene state into symbolic PDDL predicates.
 
     This is the main function for symbolic abstraction (lifting).
@@ -218,6 +219,7 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any]) -> Set[
         scene: Genesis scene object
         robot: RobotAdapter instance
         blocks_state: Dictionary mapping block names to Genesis entities
+        goal_id: Goal identifier (1-3: standard blocks, 4: position-aware)
 
     Returns:
         Set of tuples representing true predicates
@@ -232,12 +234,16 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any]) -> Set[
             ("handempty",)        # Robot not holding anything
         }
 
-    Predicates:
+    Predicates (Goals 1-3):
         - (ontable, block): block is on the table
         - (on, block_a, block_b): block_a is on top of block_b
         - (clear, block): nothing is on top of block
         - (holding, block): robot is holding block
         - (handempty,): robot gripper is empty
+
+    Additional Predicates (Goal 4):
+        - (at-position, block, position): block is at named position
+        - (position-free, position): position is not occupied
     """
     predicates = set()
 
@@ -274,6 +280,33 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any]) -> Set[
     if robot.attached_object is None:
         predicates.add(("handempty",))
 
+    # Goal 4: Add position predicates
+    if goal_id == 4:
+        try:
+            from goal4_config import find_block_position, get_all_position_names
+
+            # Track which positions are occupied
+            occupied_positions = set()
+
+            # Check each block's position
+            for block_name in blocks_state.keys():
+                block_pos = block_positions[block_name]
+                pos_name = find_block_position(block_pos)
+
+                if pos_name is not None:
+                    predicates.add(("at-position", block_name, pos_name))
+                    occupied_positions.add(pos_name)
+
+            # Mark free positions
+            all_positions = get_all_position_names()
+            for pos_name in all_positions:
+                if pos_name not in occupied_positions:
+                    predicates.add(("position-free", pos_name))
+
+        except ImportError:
+            # Goal 4 config not available, skip position predicates
+            pass
+
     return predicates
 
 
@@ -294,6 +327,8 @@ def visualize_predicates(predicates: Set[Tuple], title: str = "Current State") -
     clear = [p for p in predicates if p[0] == "clear"]
     holding = [p for p in predicates if p[0] == "holding"]
     handempty = [p for p in predicates if p[0] == "handempty"]
+    at_position = [p for p in predicates if p[0] == "at-position"]
+    position_free = [p for p in predicates if p[0] == "position-free"]
 
     if ontable:
         print("\nBlocks on table:")
@@ -317,6 +352,19 @@ def visualize_predicates(predicates: Set[Tuple], title: str = "Current State") -
 
     if handempty:
         print("\nRobot hand: EMPTY")
+
+    if at_position:
+        print(f"\nBlocks at positions ({len(at_position)} occupied):")
+        for pred in sorted(at_position):
+            print(f"  - {pred[1].upper()} at {pred[2]}")
+
+    if position_free:
+        print(f"\nFree positions ({len(position_free)} available):")
+        # Only show first 10 to avoid clutter
+        for pred in sorted(position_free)[:10]:
+            print(f"  - {pred[1]}")
+        if len(position_free) > 10:
+            print(f"  ... and {len(position_free) - 10} more")
 
     print(f"{'='*60}\n")
 

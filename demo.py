@@ -79,6 +79,48 @@ def execute_action(franka, scene, BlocksState, action):
 
         return True
 
+    elif name == "PUTDOWN-AT":
+        # Goal 4: Place block at specific position
+        blk = args[0]
+        pos_name = args[1]
+        obj = BlocksState[blk]
+
+        # Get target coordinates from position name
+        try:
+            from goal4_config import get_position_coords
+            target = np.array(get_position_coords(pos_name))
+            print(f"[EXEC][PUTDOWN-AT] {blk} at position {pos_name} → {target}")
+            franka.place(target, obj=obj)
+            return True
+        except ImportError:
+            print(f"[EXEC] ERROR: goal4_config not available for PUTDOWN-AT")
+            return False
+        except KeyError:
+            print(f"[EXEC] ERROR: Unknown position {pos_name}")
+            return False
+
+    elif name == "STACK-AT":
+        # Goal 4: Stack block on another at specific position
+        block_top = args[0]
+        block_bottom = args[1]
+        pos_name = args[2]
+
+        top_obj = BlocksState[block_top]
+        bottom_obj = BlocksState[block_bottom]
+
+        # Get bottom block's actual position (should be at pos_name)
+        bottom_link = bottom_obj.links[0]
+        bottom_geom = bottom_link.geoms[0]
+        bottom_pos = bottom_geom.get_pos().cpu().numpy()
+
+        # Stack on top (one block height above)
+        place_pos = bottom_pos.copy()
+        place_pos[2] += BLOCK_SIZE
+
+        print(f"[EXEC][STACK-AT] {block_top} on {block_bottom} at {pos_name} → {place_pos}")
+        franka.place(place_pos, obj=top_obj)
+        return True
+
     print(f"[EXEC]  Unknown action {action}")
     return False
 
