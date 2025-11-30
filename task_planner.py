@@ -176,6 +176,95 @@ def parse_plan(plan_text: str) -> List[Action]:
     return plan
 
 
+def reorder_plan_by_layers(plan: List[Action]) -> List[Action]:
+    """
+    Reorder a plan to ensure bottom-layer blocks are placed before top-layer blocks.
+
+    For Goal 4 yellow cross structure:
+    - Bottom layer positions end with '_bottom'
+    - Top layer positions end with '_top'
+
+    Strategy: Group PICKUP + PUTDOWN/STACK pairs, then separate by layer.
+    """
+    bottom_layer_pairs = []  # [(PICKUP, PUTDOWN-AT/STACK-AT), ...]
+    top_layer_pairs = []
+    other_actions = []
+
+    i = 0
+    while i < len(plan):
+        action = plan[i]
+        action_name = action[0]
+
+        # Look for PICKUP followed by PUTDOWN-AT or STACK-AT
+        if action_name in ['PICKUP', 'PICKUP-AT']:
+            if i + 1 < len(plan):
+                next_action = plan[i + 1]
+                next_name = next_action[0]
+
+                if next_name == 'PUTDOWN-AT' and len(next_action) >= 3:
+                    position = next_action[2]
+                    pair = [action, next_action]
+                    if position.endswith('_bottom'):
+                        bottom_layer_pairs.append(pair)
+                    elif position.endswith('_top'):
+                        top_layer_pairs.append(pair)
+                    else:
+                        other_actions.extend(pair)
+                    i += 2  # Skip both actions
+                    continue
+
+                elif next_name == 'STACK-AT' and len(next_action) >= 5:
+                    top_position = next_action[4]
+                    pair = [action, next_action]
+                    if top_position.endswith('_top'):
+                        top_layer_pairs.append(pair)
+                    elif top_position.endswith('_bottom'):
+                        bottom_layer_pairs.append(pair)
+                    else:
+                        other_actions.extend(pair)
+                    i += 2  # Skip both actions
+                    continue
+
+        # If not part of a PICKUP+PLACE pair, add to others
+        other_actions.append(action)
+        i += 1
+
+    # Sort pairs by position for efficient execution
+    def get_position_key(pair):
+        """Extract position name from action pair for sorting."""
+        # pair is [PICKUP/PICKUP-AT, PUTDOWN-AT/STACK-AT]
+        place_action = pair[1]
+
+        if place_action[0] == 'PUTDOWN-AT' and len(place_action) >= 3:
+            return place_action[2]  # position name
+        elif place_action[0] == 'STACK-AT' and len(place_action) >= 5:
+            return place_action[4]  # top position name
+        return ""
+
+    # Sort bottom and top layer pairs by position name
+    # This groups adjacent positions together (e.g., r1_c2, r1_c3, then r2_c1, r2_c4, etc.)
+    bottom_layer_pairs.sort(key=get_position_key)
+    top_layer_pairs.sort(key=get_position_key)
+
+    # Flatten pairs back to action list
+    bottom_actions = [act for pair in bottom_layer_pairs for act in pair]
+    top_actions = [act for pair in top_layer_pairs for act in pair]
+
+    # Reconstruct: bottom layer first, then top layer, then others
+    reordered = bottom_actions + top_actions + other_actions
+
+    if len(bottom_layer_pairs) > 0 or len(top_layer_pairs) > 0:
+        print(f"[PLAN REORDER] Bottom layer action pairs: {len(bottom_layer_pairs)}")
+        print(f"[PLAN REORDER] Top layer action pairs: {len(top_layer_pairs)}")
+        print(f"[PLAN REORDER] Other actions: {len(other_actions)}")
+        if bottom_layer_pairs:
+            print(f"[PLAN REORDER] Bottom layer order: {[get_position_key(p) for p in bottom_layer_pairs]}")
+        if top_layer_pairs:
+            print(f"[PLAN REORDER] Top layer order: {[get_position_key(p) for p in top_layer_pairs]}")
+
+    return reordered
+
+
 def plan_symbolic(current_predicates: Set[Tuple],
                   goal_id: int,
                   problem_name: str = "demo_goal") -> List[Action]:
@@ -227,6 +316,13 @@ def plan_symbolic(current_predicates: Set[Tuple],
     print("[task_planner] Parsed plan:")
     for i, act in enumerate(plan):
         print(f"  {i}: {act}")
+
+    # 5) Reorder plan to ensure bottom-layer-first execution (Goal 4 only)
+    if goal_id in [4, 41, 42]:
+        plan = reorder_plan_by_layers(plan)
+        print("\n[task_planner] Reordered plan (bottom-layer first):")
+        for i, act in enumerate(plan):
+            print(f"  {i}: {act}")
 
     return plan
 

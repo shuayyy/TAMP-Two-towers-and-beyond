@@ -13,7 +13,7 @@
     (allowed-position g6 pos_back_center_bottom)
     (at-position g1 pos_front_center_bottom)
     (at-position g2 pos_front_right_bottom)
-    (at-position g4 pos_middle_right_bottom)
+    (at-position g3 pos_middle_left_bottom)
     (at-position g5 pos_back_left_bottom)
     (at-position g6 pos_back_center_bottom)
     (at-position y1 pos_r1_c2_bottom)
