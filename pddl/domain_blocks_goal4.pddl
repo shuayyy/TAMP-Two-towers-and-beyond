@@ -15,7 +15,28 @@
     (position-above ?p-top - position ?p-bottom - position)  ; P-top is directly above P-bottom
   )
 
-  ;; Simple pickup - ignores positions
+  ;; Pickup from specific position - position-aware
+  ;; For blocks at designated positions with allowed-position constraints
+  (:action pickup-at
+    :parameters (?x - block ?p - position)
+    :precondition (and
+      (ontable ?x)
+      (clear ?x)
+      (handempty)
+      (at-position ?x ?p)
+    )
+    :effect (and
+      (holding ?x)
+      (not (ontable ?x))
+      (not (clear ?x))
+      (not (handempty))
+      (not (at-position ?x ?p))
+      (position-free ?p)
+    )
+  )
+
+  ;; Fallback: Simple pickup for blocks not at designated positions
+  ;; Used when blocks from other goals are in the way
   (:action pickup
     :parameters (?x - block)
     :precondition (and
@@ -50,7 +71,29 @@
     )
   )
 
-  ;; Simple unstack
+  ;; Unstack from specific position - position-aware
+  ;; For blocks at designated positions with allowed-position constraints
+  (:action unstack-at
+    :parameters (?x - block ?y - block ?p - position)
+    :precondition (and
+      (on ?x ?y)
+      (clear ?x)
+      (handempty)
+      (at-position ?x ?p)
+    )
+    :effect (and
+      (holding ?x)
+      (clear ?y)
+      (not (on ?x ?y))
+      (not (clear ?x))
+      (not (handempty))
+      (not (at-position ?x ?p))
+      (position-free ?p)
+    )
+  )
+
+  ;; Fallback: Simple unstack for blocks not at designated positions
+  ;; Used when blocks from other goals are in the way
   (:action unstack
     :parameters (?x - block ?y - block)
     :precondition (and

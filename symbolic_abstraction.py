@@ -288,6 +288,10 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any],
             # Track which positions are occupied
             occupied_positions = set()
 
+            # DEBUG: Track yellow blocks detection
+            yellow_blocks_detected = []
+            yellow_blocks_missing = []
+
             # Check each block's position at goal locations
             for block_name in blocks_state.keys():
                 block_pos = block_positions[block_name]
@@ -296,6 +300,39 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any],
                 if pos_name is not None:
                     predicates.add(("at-position", block_name, pos_name))
                     occupied_positions.add(pos_name)
+                    if block_name.startswith('y'):
+                        yellow_blocks_detected.append((block_name, pos_name))
+                else:
+                    if block_name.startswith('y'):
+                        yellow_blocks_missing.append((block_name, block_pos))
+
+            # DEBUG: Print summary for yellow blocks
+            if goal_id == 41 and (yellow_blocks_missing or len(yellow_blocks_detected) < 12):
+                print(f"\n[YELLOW BLOCKS DEBUG] Goal 41 perception:")
+                print(f"  Detected: {len(yellow_blocks_detected)}/12 yellow blocks")
+                for name, pos in sorted(yellow_blocks_detected):
+                    print(f"    ✓ {name} at {pos}")
+                if yellow_blocks_missing:
+                    print(f"  Missing: {len(yellow_blocks_missing)} yellow blocks")
+                    from goal4_config import GOAL4_POSITION_COORDS
+                    for name, actual_pos in sorted(yellow_blocks_missing):
+                        print(f"    ✗ {name} at [{actual_pos[0]:.4f}, {actual_pos[1]:.4f}, {actual_pos[2]:.4f}]")
+                        # Find closest expected position
+                        min_dist = float('inf')
+                        closest_pos = None
+                        for expected_name, expected_coords in GOAL4_POSITION_COORDS.items():
+                            if not expected_name.startswith('pos_r'):
+                                continue
+                            expected = np.array(expected_coords)
+                            xy_dist = np.linalg.norm(actual_pos[:2] - expected[:2])
+                            z_dist = abs(actual_pos[2] - expected[2])
+                            total_dist = np.sqrt(xy_dist**2 + z_dist**2)
+                            if total_dist < min_dist:
+                                min_dist = total_dist
+                                closest_pos = (expected_name, xy_dist, z_dist)
+                        if closest_pos:
+                            print(f"      Closest: {closest_pos[0]} (XY={closest_pos[1]*1000:.1f}mm, Z={closest_pos[2]*1000:.1f}mm)")
+                print()
 
             # Mark free positions
             all_positions = get_all_position_names()

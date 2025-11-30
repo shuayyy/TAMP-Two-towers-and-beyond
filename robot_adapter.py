@@ -1,16 +1,26 @@
 """
 RobotAdapter: a thin adapter around a Genesis robot entity.
 
-Now with:
+Features:
+  • Transparent pass-through to underlying robot
+  • OMPL motion planning bridge via PlannerInterface
   • move_to_pose(..., ignore_collisions=False)
   • attach_object / detach_object + auto hand-follow
   • pick(pos, quat, obj=None) / place(pos, quat, obj=None)
 """
 
 from typing import Any, Optional
-import time
 import numpy as np
-from genesis.utils.misc import tensor_to_array  # TODO: use this utility for conversions
+
+from genesis.utils.misc import tensor_to_array  # robust tensor → np converter
+
+
+def _to_np(x) -> np.ndarray:
+    """Safely convert Genesis / torch tensors or arrays to np.ndarray."""
+    try:
+        return tensor_to_array(x)
+    except Exception:
+        return np.asarray(x, dtype=float)
 
 
 class RobotAdapter:
@@ -25,19 +35,18 @@ class RobotAdapter:
         self.scene = scene
 
         # --- grasp/attachment state ---
-        self.attached_object = None
-        self._attach_offset = None
+        self.attached_object: Optional[Any] = None
+        self._attach_offset: Optional[np.ndarray] = None  # obj_pos - hand_pos
         self._sync_cb = None
+
+        # For fallback mode: ensure we only wrap scene.step() ONCE
+        self._step_wrapped = False
 
     # ------------------------------------------------------------------
     # Transparent forwarding
     # ------------------------------------------------------------------
     def __getattr__(self, name: str) -> Any:
-        """Forward unknown attribute access to the underlying robot.
-
-        This makes the adapter nearly transparent by default so existing
-        code can keep using the usual robot API.
-        """
+        """Forward unknown attribute access to the underlying robot."""
         return getattr(self.robot, name)
 
     # Convenience wrappers (stable names)
@@ -73,28 +82,24 @@ class RobotAdapter:
     # ------------------------------------------------------------------
     def plan_path(self, *args, **kwargs):
         """
-        Using PlannerInterface for motion planning (in planning.py)
+        Use PlannerInterface (planning.py) for motion planning.
         """
         from planning import PlannerInterface
 
         print("[DEBUG][RobotAdapter] plan_path() called")
-
         planner_interface = PlannerInterface(self.robot, self.scene)
-        print("[DEBUG][RobotAdapter] Forwarding to PlannerInterface.plan_path()")
-        waypoints = planner_interface.plan_path(*args, **kwargs)
-        print(f"[DEBUG][RobotAdapter] OMPL returned {len(waypoints)} waypoints")
-        return waypoints
-
-    # Planning interface
+        path = planner_interface.plan_path(*args, **kwargs)
+        print(f"[DEBUG][RobotAdapter] OMPL returned {len(path)} waypoints")
+        return path
 
     # ------------------------------------------------------------------
     # Debug utils
     # ------------------------------------------------------------------
-    def print_ee_pose(self, string_label=""):
-        """Print current end-effector (ee) position and orientation."""
+    def print_ee_pose(self, string_label: str = ""):
+        """Print current end-effector (EE) position and orientation."""
         ee_link = self.get_link("hand")
-        ee_pos = ee_link.get_pos().cpu().numpy()
-        ee_quat = ee_link.get_quat().cpu().numpy()
+        ee_pos = _to_np(ee_link.get_pos())
+        ee_quat = _to_np(ee_link.get_quat())
         print(f"\n[POSE] {string_label}")
         print(f"  Position : {np.round(ee_pos, 4)}")
         print(f"  Quaternion: {np.round(ee_quat, 4)}")
@@ -102,18 +107,20 @@ class RobotAdapter:
     # ------------------------------------------------------------------
     # Gripper
     # ------------------------------------------------------------------
-    def open_gripper(self, open_pos=0.04, steps=20):
+    def open_gripper(self, open_pos: float = 0.04, steps: int = 20):
+        """Open parallel gripper (assumes last 2 DOFs)."""
         self.print_ee_pose("Before open_gripper()")
-        qpos = self.get_qpos()
+        qpos = _to_np(self.get_qpos())
         qpos[-2:] = open_pos
         self.control_dofs_position(qpos)
         for _ in range(steps):
             self.scene.step()
         self.print_ee_pose("After open_gripper()")
 
-    def close_gripper(self, close_pos=0.0, steps=100):
+    def close_gripper(self, close_pos: float = 0.0, steps: int = 100):
+        """Close parallel gripper (assumes last 2 DOFs)."""
         self.print_ee_pose("Before close_gripper()")
-        qpos = self.get_qpos()
+        qpos = _to_np(self.get_qpos())
         qpos[-2:] = close_pos
         self.control_dofs_position(qpos)
         for _ in range(steps):
@@ -123,27 +130,20 @@ class RobotAdapter:
     # ------------------------------------------------------------------
     # ATTACH / DETACH (virtual, version-agnostic)
     # ------------------------------------------------------------------
-    def attach_object(self, obj):
-        """Save hand→obj offset and start kinematic sync."""
+    def attach_object(self, obj: Any):
+        """Save full hand→obj offset and start kinematic sync."""
         self.attached_object = obj
+
         hand = self.get_link("hand")
-        hand_pos = hand.get_pos()
-        obj_pos = obj.get_pos()
-        try:
-            hand_pos = hand_pos.cpu().numpy()
-        except Exception:
-            pass
-        try:
-            obj_pos = obj_pos.cpu().numpy()
-        except Exception:
-            pass
+        hand_pos = _to_np(hand.get_pos())
+        obj_pos = _to_np(obj.get_pos())
+
+        # Full 3D offset from hand to object center
         offset = obj_pos - hand_pos
-        offset[0] = 0.0  # lock X to hand
-        offset[1] = 0.0  # lock Y to hand
-        self._attach_offset = offset
+        self._attach_offset = offset.copy()
 
         self._enable_sync()
-        print("[ROBOT][ATTACH] attached; offset =", self._attach_offset)
+        print("[ROBOT][ATTACH] attached; offset =", np.round(self._attach_offset, 4))
 
     def detach_object(self):
         """Stop kinematic sync and clear state."""
@@ -156,17 +156,11 @@ class RobotAdapter:
         """Keep the attached object rigidly at the hand each sim step."""
         if self.attached_object is None or self._attach_offset is None:
             return
+
         hand = self.get_link("hand")
-        hand_pos = hand.get_pos()
-        hand_quat = hand.get_quat()
-        try:
-            hand_pos = hand_pos.cpu().numpy()
-        except Exception:
-            pass
-        try:
-            hand_quat = hand_quat.cpu().numpy()
-        except Exception:
-            pass
+        hand_pos = _to_np(hand.get_pos())
+        hand_quat = _to_np(hand.get_quat())
+
         target_pos = hand_pos + self._attach_offset
         self.attached_object.set_pos(target_pos)
         self.attached_object.set_quat(hand_quat)
@@ -175,53 +169,72 @@ class RobotAdapter:
         """Register a post-step callback (idempotent)."""
         if self._sync_cb is not None:
             return
-        # Try common Genesis callback names; fall back to a simple wrapper
+
+        if self.scene is None:
+            print("[WARN] RobotAdapter._enable_sync(): scene is None, cannot sync.")
+            self._sync_cb = None
+            return
+
+        # Preferred: real callbacks if Genesis supports them
         if hasattr(self.scene, "add_post_step_callback"):
-            self._sync_cb = self.scene.add_post_step_callback(self._sync_attached_object)
+            self._sync_cb = self.scene.add_post_step_callback(
+                self._sync_attached_object
+            )
         elif hasattr(self.scene, "add_post_step_cb"):
             self._sync_cb = self.scene.add_post_step_cb(self._sync_attached_object)
         else:
-            # Fallback: wrap scene.step() to always call sync after step
-            orig_step = self.scene.step
+            # Fallback: wrap scene.step(), but only ONCE
+            if not self._step_wrapped:
+                orig_step = self.scene.step
 
-            def step_wrapper(*args, **kwargs):
-                r = orig_step(*args, **kwargs)
-                self._sync_attached_object()
-                return r
-            self.scene.step = step_wrapper
+                def step_wrapper(*args, **kwargs):
+                    r = orig_step(*args, **kwargs)
+                    self._sync_attached_object()
+                    return r
+
+                self.scene.step = step_wrapper
+                self._step_wrapped = True
+
+            # Using sentinel to indicate wrapper mode
             self._sync_cb = "wrapped"
 
     def _disable_sync(self):
         """Unregister post-step callback (idempotent)."""
         if self._sync_cb is None:
             return
+
         if self._sync_cb != "wrapped":
             if hasattr(self.scene, "remove_post_step_callback"):
                 self.scene.remove_post_step_callback(self._sync_cb)
             elif hasattr(self.scene, "remove_post_step_cb"):
                 self.scene.remove_post_step_cb(self._sync_cb)
-        else:
-            # If we wrapped scene.step(), we can’t easily restore the original here.
-            # Safe to leave wrapped; sync is a no-op when no object is attached.
-            pass
+
+        # For the wrapper case, we DO NOT unwrap scene.step.
+        # We just clear state; _sync_attached_object() is a no-op when nothing attached.
         self._sync_cb = None
 
     # ------------------------------------------------------------------
     # Motion
     # ------------------------------------------------------------------
-    def move_to_pose(self, qpos_goal, steps=300, ignore_collisions=False):
+    def move_to_pose(
+        self,
+        qpos_goal,
+        steps: int = 300,
+        ignore_collisions: bool = False,
+    ):
         """Plan and execute path using OMPL planner."""
         self.print_ee_pose("Before move_to_pose()")
 
-        qpos_start = self.get_qpos()
+        qpos_start = _to_np(self.get_qpos())
         print(f"[DEBUG] attached_object: {self.attached_object}")
-        auto_ignore = False
-        use_ignore = ignore_collisions
-        print(f"[DEBUG] move_to_pose(): ignore_collisions={ignore_collisions}, auto_ignore={auto_ignore} => use_ignore={use_ignore}")
+        print(
+            f"[DEBUG] move_to_pose(): ignore_collisions={ignore_collisions}"
+        )
 
-        if use_ignore:
-            print("[DEBUG] Ignoring collisions during motion planning (grasp context).")
+        if ignore_collisions:
+            print("[DEBUG] Ignoring collisions during motion planning (explicit flag).")
             from planning import PlannerInterface
+
             planner_interface = PlannerInterface(self.robot, self.scene)
             path = planner_interface.plan_path(
                 qpos_goal=qpos_goal,
@@ -237,7 +250,9 @@ class RobotAdapter:
             )
 
         if len(path) == 0:
-            print("[WARN] OMPL returned empty path; executing direct control to goal.")
+            print(
+                "[WARN] OMPL returned empty path; executing direct control to goal."
+            )
             self.control_dofs_position(qpos_goal)
             for _ in range(100):
                 self.scene.step()
@@ -249,14 +264,35 @@ class RobotAdapter:
 
         self.print_ee_pose("After move_to_pose()")
 
-    def pre_grasp_pose(self, pos, quat, approach_dir=np.array([0, 0, 1]), offset=0.10, steps=300):
+    def _servo_to_q(self, q_goal, steps: int = 80):
+        """Simple joint-space interpolation from current q to q_goal."""
+        q_start = _to_np(self.get_qpos())
+        q_goal = _to_np(q_goal)
+
+        for alpha in np.linspace(0.0, 1.0, steps):
+            q = (1.0 - alpha) * q_start + alpha * q_goal
+            self.control_dofs_position(q)
+            self.scene.step()
+
+    def pre_grasp_pose(
+        self,
+        pos,
+        quat,
+        approach_dir: np.ndarray = np.array([0.0, 0.0, 1.0]),
+        offset: float = 0.10,
+        steps: int = 300,
+    ):
         """
         Move the end-effector to a pre-grasp position offset from the object
         along the specified approach direction.
         """
+        pos = _to_np(pos)
+        approach_dir = _to_np(approach_dir)
         self.print_ee_pose("Before pre_grasp_pose()")
+
         pregrasp_pos = pos + approach_dir * offset
         print(f"[DEBUG] Pre-grasp position: {pregrasp_pos}")
+
         qpos_pregrasp = self.inverse_kinematics(
             link=self.get_link("hand"),
             pos=pregrasp_pos,
@@ -265,117 +301,210 @@ class RobotAdapter:
         self.move_to_pose(qpos_pregrasp, steps=steps)
         self.print_ee_pose("After pre_grasp_pose()")
 
-    def post_grasp_pose(self, pos, quat, approach_dir=np.array([0, 0, -1]), offset=0.10, steps=300):
+    def post_grasp_pose(
+        self,
+        pos,
+        quat,
+        approach_dir: np.ndarray = np.array([0.0, 0.0, -1.0]),
+        offset: float = 0.10,
+        steps: int = 300,
+    ):
         """
         Move the end-effector away from the grasped object (opposite of approach direction).
         """
+        pos = _to_np(pos)
+        approach_dir = _to_np(approach_dir)
         self.print_ee_pose("Before post_grasp_pose()")
+
         retreat_pos = pos - approach_dir * offset
         print(f"[DEBUG] Post-grasp position: {retreat_pos}")
+
         qpos_postgrasp = self.inverse_kinematics(
             link=self.get_link("hand"),
             pos=retreat_pos,
             quat=quat,
         )
-        # If attached_object exists, collisions are ignored automatically inside move_to_pose
         self.move_to_pose(qpos_postgrasp, steps=steps)
         self.print_ee_pose("After post_grasp_pose()")
 
     # ------------------------------------------------------------------
     # High-level actions (obj is optional for backward compatibility)
     # ------------------------------------------------------------------
-    def pick(self, pos, quat=np.array([0, 1, 0, 0]), obj: Optional[Any] = None):
+    def pick(
+        self,
+        pos,
+        quat: np.ndarray = np.array([0.0, 1.0, 0.0, 0.0]),
+        obj: Optional[Any] = None,
+    ):
         """
         Approach → open → descend → close → retreat.
         If obj is provided, it will be attached after closing the gripper.
+
+        pos: desired object center world position BEFORE the fingertip offset
+        is added (i.e., nominal block center on the table).
         """
+        pos = _to_np(pos).copy()
+
         # compensate for fingertip-to-EE offset (approx 12 cm)
-        pos = np.array(pos, dtype=float)
         pos[2] += 0.12
 
         self.print_ee_pose("Before pick()")
+
+        # 1) Pre-g
         self.pre_grasp_pose(pos, quat)
+
+        # 2) Open gripper
         self.open_gripper()
 
-        qpos_grasp = self.inverse_kinematics(link=self.get_link("hand"), pos=pos, quat=quat)
+        # 3) Move to grasp pose
+        qpos_grasp = self.inverse_kinematics(
+            link=self.get_link("hand"),
+            pos=pos,
+            quat=quat,
+        )
         self.move_to_pose(qpos_grasp, steps=200)
+
+        # 4) Close gripper
         self.close_gripper()
 
-        # Attach if provided
+        # 5) Attach if provided
         if obj is not None:
             self.attach_object(obj)
 
-        # Retreat up (auto ignores collisions if attached)
+        # 6) Retreat up (relative to grasped pose)
         qpos_retreat = self.inverse_kinematics(
             link=self.get_link("hand"),
-            pos=pos + np.array([0, 0, 0.15]),
+            pos=pos + np.array([0.0, 0.0, 0.15]),
             quat=quat,
         )
-
-        print("move to retreat pose called ", qpos_retreat)
+        print("[DEBUG] move_to retreat pose called")
         self.move_to_pose(qpos_retreat, steps=200)
         self.print_ee_pose("After pick()")
 
-    def place(self, pos, quat=np.array([0, 1, 0, 0]), obj: Optional[Any] = None):
+    def place(
+        self,
+        pos,
+        quat: np.ndarray = np.array([0.0, 1.0, 0.0, 0.0]),
+        obj: Optional[Any] = None,
+        hover_height: float = 0.08,
+    ):
         """
-        Places the currently attached object at the given position.
-        Moves slightly above the target, compensates grasp offset,
-        performs fine XY correction, detaches, opens gripper, and retreats.
+        Place the currently attached object at the given position.
+
+        Steps:
+          1) Move hand to hover above target (via OMPL)
+          2) Iterative XY correction using object center feedback
+          3) Descend to final pose (still attached)
+          4) Detach + open gripper
+          5) Retreat upward
         """
         self.print_ee_pose("Before place()")
+        pos = _to_np(pos).copy()
 
-        # 1) move 7.5 cm above target
-        pos_above = pos.copy()
-        pos_above[2] += 0.075
+        # === 1) target object center hover above final stack position ===
+        pos_above_obj = pos.copy()
+        pos_above_obj[2] += hover_height
 
-        # compensate grasp offset so cube centers correctly
-        off = np.zeros(3)
+        # If we have an attached object, we know the offset between hand and object center
+        off = np.zeros(3, dtype=float)
         if self.attached_object is not None and self._attach_offset is not None:
-            off = np.array(self._attach_offset, dtype=float)
+            off = self._attach_offset.astype(float)
 
-        print("offset :", off)
-        print("pos :", pos)
-        print("pos above:", pos_above - off)
-        self.print_ee_pose("DEBUG CHECK")
+        print("[DEBUG] attach offset:", np.round(off, 4))
+        print("[DEBUG] desired object pos:", np.round(pos, 4))
+        print("[DEBUG] desired object pos above:", np.round(pos_above_obj, 4))
 
-        # aim the HAND at (pos_above - off)
+        # Where the HAND should be if object center = pos_above_obj
+        target_hand_pos_above = pos_above_obj - off
+
+        # === 2) Move to hover pose via OMPL (coarse motion) ===
         q_above = self.inverse_kinematics(
             link=self.get_link("hand"),
-            pos=pos_above - off,
+            pos=target_hand_pos_above,
             quat=quat,
         )
-
-        print("[DEBUG] GOAL POSITION, QPOS:", q_above)
-        print("[DEBUG]")
-        # ---- Move once ----
+        print("[DEBUG] Initial hover qpos:", q_above)
         self.move_to_pose(q_above, steps=200)
-        self.print_ee_pose("DEBUG CHECK")
+        self.print_ee_pose("[DEBUG] After initial hover move")
 
-        # ---- Iterative XY correction loop ----
-        max_iters = 3
-        for i in range(max_iters):
+        # === 3) Iterative XY correction (local servo loop at hover) ===
+        # 0.0001 m = 0.1 mm (hard target; may stall earlier if IK/contact limited)
+        tol_xy = 1e-4
+        max_iters = 30
+        stall_eps = 1e-5   # if improvement < this, treat as stalled
+        prev_err = None
+
+        for it in range(max_iters):
             hand = self.get_link("hand")
-            ee_pos = hand.get_pos().cpu().numpy()
-            target_pos = pos_above - off
+            ee_pos = _to_np(hand.get_pos())
 
-            # Compute X and Y errors separately
-            x_err = abs(ee_pos[0] - target_pos[0])
-            y_err = abs(ee_pos[1] - target_pos[1])
-            print(f"[DEBUG][CORRECTION {i}] X err: {x_err:.4f} | Y err: {y_err:.4f}")
+            # Use actual object pose if we can; otherwise, approximate from hand+offset
+            if self.attached_object is not None:
+                obj_pos = _to_np(self.attached_object.get_pos())
+            else:
+                obj_pos = ee_pos + off
 
-            # Stop if both errors are within 5 mm
-            if x_err <= 0.001 and y_err <= 0.001:
-                print("[DEBUG][CORRECTION] Pose aligned within tolerance ✅")
+            target_xy = pos[:2]       # desired object center XY
+            err_xy = target_xy - obj_pos[:2]
+            err_norm = float(np.linalg.norm(err_xy))
+
+            print(
+                f"[CORRECTION {it}] XY error = "
+                f"({err_xy[0]:+.6f}, {err_xy[1]:+.6f}), "
+                f"‖err‖ = {err_norm:.6f} m"
+            )
+
+            # Reached tolerance?
+            if err_norm < tol_xy:
+                print(f"[CORRECTION] Reached tolerance {tol_xy} m, stopping.")
                 break
 
-            # Otherwise, correct position
-            target_pos[1] += 0.001
-            q_fix = self.inverse_kinematics(link=hand, pos=target_pos, quat=quat)
-            self.move_to_pose(q_fix, steps=80)
+            # No meaningful improvement → IK has hit its internal floor
+            if prev_err is not None and abs(prev_err - err_norm) < stall_eps:
+                print(
+                    f"[CORRECTION] Stalled at ~{err_norm:.6f} m "
+                    f"(Δ‖err‖ < {stall_eps}), breaking."
+                )
+                break
+            prev_err = err_norm
 
-        self.print_ee_pose("[DEBUG] After XY correction")
+            # Simple proportional step in hand XY
+            k = 2.0  # gain (tuned for convergence)
+            dx = k * err_xy[0]
+            dy = k * err_xy[1]
 
-        # 3) detach first (stop kinematic sync), then open gripper
+            new_hand_pos = ee_pos.copy()
+            new_hand_pos[0] += dx
+            new_hand_pos[1] += dy
+            # Keep same hover Z
+            new_hand_pos[2] = target_hand_pos_above[2]
+
+            print(
+                f"[CORRECTION {it}] Applying Δhand = "
+                f"({dx:+.6f}, {dy:+.6f})"
+            )
+
+            q_fix = self.inverse_kinematics(
+                link=hand,
+                pos=new_hand_pos,
+                quat=quat,
+            )
+            self._servo_to_q(q_fix, steps=30)
+
+        self.print_ee_pose("[DEBUG] After hover XY servo loop")
+
+        # === 4) Descend to final Z while STILL attached ===
+        final_hand_pos = pos - off  # object center should end up at pos (up to servo error)
+        q_final = self.inverse_kinematics(
+            link=self.get_link("hand"),
+            pos=final_hand_pos,
+            quat=quat,
+        )
+        print("[DEBUG] Descend to final pose qpos:", q_final)
+        self._servo_to_q(q_final, steps=80)
+        self.print_ee_pose("[DEBUG] At final place pose (attached)")
+
+        # Detach first, then open gripper
         if obj is not None and obj is self.attached_object:
             self.detach_object()
         elif obj is None and self.attached_object is not None:
@@ -383,11 +512,31 @@ class RobotAdapter:
 
         self.open_gripper()
 
-        # 4) retreat upward to avoid re-contact
+        # Log final object error but DO NOT snap/teleport
+        try:
+            if obj is not None:
+                final_obj_pos = _to_np(obj.get_pos())
+                xy_err_vec = pos[:2] - final_obj_pos[:2]
+                xy_err_norm = float(np.linalg.norm(xy_err_vec))
+
+                print(
+                    "[DEBUG] Final placed object center:",
+                    np.round(final_obj_pos, 4),
+                    "‖XY err‖ =",
+                    f"{xy_err_norm:.6f} m",
+                )
+        except Exception as e:
+            print("[DEBUG] Could not read final object pose:", e)
+
+        # === 5) Retreat upward so we don't collide with the stack ===
         pos_retreat = pos.copy()
         pos_retreat[2] += 0.30
-        q_retreat = self.inverse_kinematics(link=self.get_link("hand"), pos=pos_retreat, quat=quat)
-        print("move to pose called ", pos_retreat)
+        q_retreat = self.inverse_kinematics(
+            link=self.get_link("hand"),
+            pos=pos_retreat,
+            quat=quat,
+        )
+        print("[DEBUG] move_to_pose retreat called, pos_retreat:", pos_retreat)
         self.move_to_pose(q_retreat, steps=200)
         self.print_ee_pose("After place()")
 
@@ -396,4 +545,5 @@ class RobotAdapter:
     # ------------------------------------------------------------------
     @property
     def raw(self):
+        """Direct access to underlying Genesis robot entity."""
         return self.robot
