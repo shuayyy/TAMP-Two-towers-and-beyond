@@ -19,6 +19,7 @@ from scenes import create_scene_goal4_initial
 from robot_adapter import RobotAdapter
 from symbolic_abstraction import abstract_state, visualize_predicates
 from task_planner import plan_symbolic
+from goal4_config import get_position_coords
 
 BLOCK_SIZE = 0.04
 
@@ -135,14 +136,10 @@ def execute_action(franka, scene, BlocksState, action):
 
         # Get target coordinates from position name
         try:
-            from goal4_config import get_position_coords
             target = np.array(get_position_coords(pos_name))
             print(f"[EXEC][PUTDOWN-AT] {blk} at position {pos_name} → {target}")
             franka.place(target, obj=obj)
             return True
-        except ImportError:
-            print(f"[EXEC] ERROR: goal4_config not available for PUTDOWN-AT")
-            return False
         except KeyError:
             print(f"[EXEC] ERROR: Unknown position {pos_name}")
             return False

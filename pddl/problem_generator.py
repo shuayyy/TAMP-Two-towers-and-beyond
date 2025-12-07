@@ -174,6 +174,11 @@ def make_problem_pddl(current_predicates: Set[Tuple],
     """
     Create a PDDL problem file from current_predicates + chosen goal.
 
+    Args:
+        current_predicates: Current state predicates
+        goal_id: Goal identifier
+        problem_name: Name for the problem file
+
     Returns:
         Path to the written .pddl file as string.
     """
