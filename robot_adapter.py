@@ -431,7 +431,7 @@ class RobotAdapter:
         quat: np.ndarray = np.array([0.0, 1.0, 0.0, 0.0]),
         obj: Optional[Any] = None,
         hover_height: float = 0.08,
-        release_clearance: float = 0.012,   # release a few mm above target
+        release_clearance: float = 0.008,   # release a few mm above target
     ):
         """
         PLACE SEQUENCE
