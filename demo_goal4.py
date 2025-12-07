@@ -204,119 +204,97 @@ if __name__ == "__main__":
     print(f"[INFO] Total blocks: {len(BlocksState)}")
     print()
 
-    # Sequential TAMP: Build yellow tower first, then green square
-    MAX_STEPS_PER_STRUCTURE = 25
+    # === SEQUENTIAL TAMP CONFIGURATION (Data-driven, not hardcoded) ===
+    # Define phases for Goal 4 decomposition
+    # Each phase is a dictionary with configuration parameters
+    GOAL4_PHASES = [
+        {
+            "goal_id": 41,
+            "name": "Yellow Cross Tower",
+            "description": "12 blocks in cross pattern, 2 layers",
+            "batch_size": 2,  # Small batch for tall structure (frequent replanning for stability)
+            "max_iterations": 25,
+        },
+        {
+            "goal_id": 42,
+            "name": "Green Hollow Square",
+            "description": "6 blocks in 3×3 hollow square, 1 layer",
+            "batch_size": 10,  # Large batch for flat structure (can execute more before replanning)
+            "max_iterations": 25,
+        },
+    ]
 
-    # Phase 1: Build yellow cross tower
-    print("\n" + "=" * 80)
-    print("PHASE 1: Building Yellow Cross Tower")
-    print("=" * 80)
+    # Execute each phase sequentially
+    for phase_idx, phase_config in enumerate(GOAL4_PHASES, start=1):
+        goal_id = phase_config["goal_id"]
+        phase_name = phase_config["name"]
+        batch_size = phase_config["batch_size"]
+        max_iterations = phase_config["max_iterations"]
 
-    for step_idx in range(MAX_STEPS_PER_STRUCTURE):
-        print("\n" + "-" * 80)
-        print(f"YELLOW TOWER - Iteration {step_idx}")
-        print("-" * 80)
+        print("\n" + "=" * 80)
+        print(f"PHASE {phase_idx}/{len(GOAL4_PHASES)}: {phase_name}")
+        print(f"  Goal ID: {goal_id}")
+        print(f"  Description: {phase_config['description']}")
+        print(f"  Batch size: {batch_size} actions/iteration")
+        print("=" * 80)
 
-        # 1. Symbolic abstraction for yellow tower goal
-        preds = abstract_state(scene, franka, BlocksState, goal_id=41)
-        visualize_predicates(preds, title=f"Yellow tower state - step {step_idx}")
+        # Iterative TAMP loop for this phase
+        for step_idx in range(max_iterations):
+            print("\n" + "-" * 80)
+            print(f"{phase_name.upper()} - Iteration {step_idx}")
+            print("-" * 80)
 
-        # 2. Task planning for yellow tower (goal 41)
-        try:
-            plan = plan_symbolic(preds, goal_id=41, problem_name=f"goal41_step{step_idx}")
-        except RuntimeError as e:
-            print(f"\n[task_planner] ERROR during planning: {e}")
-            print("\n[INFO] Planning failed. Stopping execution.")
-            break
+            # 1. Symbolic abstraction
+            preds = abstract_state(scene, franka, BlocksState, goal_id=goal_id)
+            visualize_predicates(preds, title=f"{phase_name} state - step {step_idx}")
 
-        if not plan:
-            print("\n[INFO] ✓ Yellow tower COMPLETE!")
-            break
-
-        print(f"\n[TASK PLAN] ({len(plan)} actions)")
-        for i, step in enumerate(plan[:5]):
-            print(f"  {i}: {step}")
-        if len(plan) > 5:
-            print(f"  ... and {len(plan) - 5} more")
-
-        # Execute batch of actions
-        ACTIONS_PER_BATCH = 10
-        actions_to_execute = plan[:ACTIONS_PER_BATCH]
-
-        print(f"\n[BATCH EXECUTION] Executing {len(actions_to_execute)} actions...")
-
-        for action_idx, action in enumerate(actions_to_execute):
-            print(f"\n[EXEC-STEP {step_idx}.{action_idx}] Executing: {action}")
-            ok = execute_action(franka, scene, BlocksState, action)
-
-            if not ok:
-                print(f"\n[EXEC] ❌ Action failed: {action}")
-                print("[INFO] Stopping execution loop.")
+            # 2. Task planning
+            try:
+                plan = plan_symbolic(preds, goal_id=goal_id, problem_name=f"goal{goal_id}_step{step_idx}")
+            except RuntimeError as e:
+                print(f"\n[task_planner] ERROR during planning: {e}")
+                print(f"\n[INFO] Planning failed for {phase_name}. Stopping execution.")
                 break
 
-            for _ in range(20):
-                scene.step()
-        else:
-            continue
-
-        break
-
-    # Phase 2: Build green square
-    print("\n" + "=" * 80)
-    print("PHASE 2: Building Green Hollow Square")
-    print("=" * 80)
-
-    for step_idx in range(MAX_STEPS_PER_STRUCTURE):
-        print("\n" + "-" * 80)
-        print(f"GREEN SQUARE - Iteration {step_idx}")
-        print("-" * 80)
-
-        # 1. Symbolic abstraction for green square goal
-        preds = abstract_state(scene, franka, BlocksState, goal_id=42)
-        visualize_predicates(preds, title=f"Green square state - step {step_idx}")
-
-        # 2. Task planning for green square (goal 42)
-        try:
-            plan = plan_symbolic(preds, goal_id=42, problem_name=f"goal42_step{step_idx}")
-        except RuntimeError as e:
-            print(f"\n[task_planner] ERROR during planning: {e}")
-            print("\n[INFO] Planning failed. Stopping execution.")
-            break
-
-        if not plan:
-            print("\n[INFO] ✓ Green square COMPLETE!")
-            print("\n" + "=" * 80)
-            print("GOAL 4 FULLY COMPLETED!")
-            print("=" * 80)
-            break
-
-        print(f"\n[TASK PLAN] ({len(plan)} actions)")
-        for i, step in enumerate(plan[:5]):
-            print(f"  {i}: {step}")
-        if len(plan) > 5:
-            print(f"  ... and {len(plan) - 5} more")
-
-        # Execute batch of actions
-        ACTIONS_PER_BATCH = 10
-        actions_to_execute = plan[:ACTIONS_PER_BATCH]
-
-        print(f"\n[BATCH EXECUTION] Executing {len(actions_to_execute)} actions...")
-
-        for action_idx, action in enumerate(actions_to_execute):
-            print(f"\n[EXEC-STEP {step_idx}.{action_idx}] Executing: {action}")
-            ok = execute_action(franka, scene, BlocksState, action)
-
-            if not ok:
-                print(f"\n[EXEC] ❌ Action failed: {action}")
-                print("[INFO] Stopping execution loop.")
+            # Check if goal achieved (empty plan means goal satisfied)
+            if not plan:
+                print(f"\n[INFO] ✓ {phase_name} COMPLETE!")
+                if phase_idx == len(GOAL4_PHASES):
+                    print("\n" + "=" * 80)
+                    print("🎉 GOAL 4 FULLY COMPLETED! 🎉")
+                    print("=" * 80)
                 break
 
-            for _ in range(20):
-                scene.step()
-        else:
-            continue
+            # Display plan
+            print(f"\n[TASK PLAN] ({len(plan)} actions)")
+            for i, step in enumerate(plan[:5]):
+                print(f"  {i}: {step}")
+            if len(plan) > 5:
+                print(f"  ... and {len(plan) - 5} more")
 
-        break
+            # 3. Execute batch of actions
+            actions_to_execute = plan[:batch_size]
+            print(f"\n[BATCH EXECUTION] Executing {len(actions_to_execute)} actions...")
+
+            # Execute each action in the batch
+            execution_failed = False
+            for action_idx, action in enumerate(actions_to_execute):
+                print(f"\n[EXEC-STEP {step_idx}.{action_idx}] Executing: {action}")
+                ok = execute_action(franka, scene, BlocksState, action)
+
+                if not ok:
+                    print(f"\n[EXEC] ❌ Action failed: {action}")
+                    print(f"[INFO] Stopping execution for {phase_name}.")
+                    execution_failed = True
+                    break
+
+                # Update physics simulation
+                for _ in range(20):
+                    scene.step()
+
+            # If execution failed, stop this phase
+            if execution_failed:
+                break
 
     print("\n[INFO] Demo complete. Close viewer to exit.")
 
