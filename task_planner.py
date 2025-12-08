@@ -36,9 +36,14 @@ def get_domain_file(goal_id: int) -> str:
 Action = Tuple[str, ...]  # e.g. ("STACK", "r", "g")
 
 
-def run_pyperplan(domain_file: str, problem_file: str) -> str:
+def run_pyperplan(domain_file: str, problem_file: str, goal_id: int = 1) -> str:
     """
     Call pyperplan using its Python API directly.
+
+    Args:
+        domain_file: Path to PDDL domain file
+        problem_file: Path to PDDL problem file
+        goal_id: Goal identifier (used to select appropriate planner)
 
     Returns:
         plan_text: the plan actions (one action per line).
@@ -46,14 +51,18 @@ def run_pyperplan(domain_file: str, problem_file: str) -> str:
     try:
         # Import pyperplan modules
         from pyperplan import planner
-        from pyperplan.search import enforced_hillclimbing_search
         from pyperplan.heuristics.relaxation import hFFHeuristic
 
-        print("[task_planner] Running pyperplan with Enforced Hill-Climbing (fast)...")
-
-        # Use Enforced Hill-Climbing for faster planning on large problems
-        # This is much faster than A* for Goal 4 with 18 blocks
-        plan = planner.search_plan(domain_file, problem_file, enforced_hillclimbing_search, hFFHeuristic)
+        # Use A* for optimal plans on small problems (Goals 1-3)
+        # Use Enforced Hill-Climbing for faster planning on large problems (Goal 4)
+        if goal_id in [4, 41, 42]:
+            from pyperplan.search import enforced_hillclimbing_search
+            print("[task_planner] Running pyperplan with Enforced Hill-Climbing (fast for Goal 4)...")
+            plan = planner.search_plan(domain_file, problem_file, enforced_hillclimbing_search, hFFHeuristic)
+        else:
+            from pyperplan.search import astar_search
+            print("[task_planner] Running pyperplan with A* (optimal for Goals 1-3)...")
+            plan = planner.search_plan(domain_file, problem_file, astar_search, hFFHeuristic)
         
         if plan is None:
             raise RuntimeError("Pyperplan returned no plan (unsolvable problem?)")
@@ -302,7 +311,8 @@ def plan_symbolic(current_predicates: Set[Tuple],
     print(f"[task_planner] Using PROBLEM: {problem_file}")
 
     # 3) Run pyperplan (extracts plan from stdout or .soln) and read plan text
-    plan_text = run_pyperplan(domain_file, problem_file)
+    # Pass goal_id to select appropriate planner (A* for 1-3, EHC for 4)
+    plan_text = run_pyperplan(domain_file, problem_file, goal_id=goal_id)
 
     # 4) Parse the plan text
     plan = parse_plan(plan_text)

@@ -283,7 +283,12 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any],
     # Goal 4 (and sub-goals 41, 42): Add position predicates
     if goal_id in [4, 41, 42]:
         try:
-            from goal4_config import find_block_position, get_all_position_names
+            from goal4_config import (
+                GOAL4_POSITION_COORDS,
+                POSITION_XY_THRESHOLD,
+                POSITION_Z_THRESHOLD,
+                get_all_position_names
+            )
 
             # Track which positions are occupied
             occupied_positions = set()
@@ -292,10 +297,26 @@ def abstract_state(scene: Any, robot: Any, blocks_state: Dict[str, Any],
             yellow_blocks_detected = []
             yellow_blocks_missing = []
 
+            # OPTIMIZATION: Pre-convert all position coords to numpy arrays (cache)
+            position_coords_np = {
+                pos_name: np.array(coords)
+                for pos_name, coords in GOAL4_POSITION_COORDS.items()
+            }
+
             # Check each block's position at goal locations
             for block_name in blocks_state.keys():
                 block_pos = block_positions[block_name]
-                pos_name = find_block_position(block_pos)
+
+                # OPTIMIZED: Manual position search with cached numpy arrays
+                pos_name = None
+                for candidate_pos_name, target_pos in position_coords_np.items():
+                    # Fast vectorized distance check
+                    xy_distance = np.linalg.norm(block_pos[:2] - target_pos[:2])
+                    if xy_distance <= POSITION_XY_THRESHOLD:
+                        z_distance = abs(block_pos[2] - target_pos[2])
+                        if z_distance <= POSITION_Z_THRESHOLD:
+                            pos_name = candidate_pos_name
+                            break
 
                 if pos_name is not None:
                     predicates.add(("at-position", block_name, pos_name))
