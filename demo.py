@@ -14,7 +14,7 @@ Usage:
 import argparse
 import numpy as np
 import genesis as gs
-from scenes import create_scene_6blocks, create_scene_goal4_initial
+from scenes import create_scene_6blocks, create_scene_stacked, create_scene_goal4_initial
 from robot_adapter import RobotAdapter
 from symbolic_abstraction import abstract_state, visualize_predicates
 from task_planner import plan_symbolic
@@ -89,8 +89,44 @@ def execute_action(franka, scene, BlocksState, action):
         blk = args[0]
         obj = BlocksState[blk]
 
-        target = np.array([0.55, 0.0, 0.05])
-        print(f"[EXEC][PUTDOWN] {blk} at {target}")
+        # Find a safe PUTDOWN position away from existing blocks
+        # Collect positions of all blocks except the one being placed
+        other_positions = []
+        for name, block_obj in BlocksState.items():
+            if name != blk:
+                try:
+                    link = block_obj.links[0]
+                    geom = link.geoms[0]
+                    pos = geom.get_pos().cpu().numpy()
+                    other_positions.append(pos[:2])  # XY only
+                except:
+                    pass
+
+        # Try candidate positions, pick first one far enough from all blocks
+        candidates = [
+            np.array([0.65, 0.15, 0.05]),   # Right side, offset in Y
+            np.array([0.65, -0.15, 0.05]),  # Right side, other Y direction
+            np.array([0.40, 0.15, 0.05]),   # Left side, offset in Y
+            np.array([0.40, -0.15, 0.05]),  # Left side, other Y direction
+            np.array([0.55, 0.20, 0.05]),   # Center, far in +Y
+            np.array([0.55, -0.20, 0.05]),  # Center, far in -Y
+        ]
+
+        min_safe_distance = 0.12  # 12cm minimum separation (prevent accidental stacking)
+        target = candidates[0]  # Default fallback
+
+        for candidate in candidates:
+            safe = True
+            for other_xy in other_positions:
+                dist = np.linalg.norm(candidate[:2] - other_xy)
+                if dist < min_safe_distance:
+                    safe = False
+                    break
+            if safe:
+                target = candidate
+                break
+
+        print(f"[EXEC][PUTDOWN] {blk} at {target} (checked {len(other_positions)} blocks)")
 
         franka.place(target, obj=obj)
         return True
@@ -242,23 +278,19 @@ def run_simple_goals(scene, franka, BlocksState, goal_id, max_iterations=20):
         for i, step in enumerate(plan):
             print(f"  {i}: {step}")
 
-        # 5. Detect action loops (same action repeating)
+        # 5. Detect action loops (same action repeating CONSECUTIVELY)
         action = plan[0]
         recent_actions.append(action)
         if len(recent_actions) > loop_detection_window:
             recent_actions.pop(0)
 
-        # Check if we're in a loop (same action appears 3+ times in recent history)
-        if len(recent_actions) >= 4:
-            action_counts = {}
-            for act in recent_actions:
-                act_str = str(act)
-                action_counts[act_str] = action_counts.get(act_str, 0) + 1
-
-            max_repeats = max(action_counts.values())
-            if max_repeats >= 3:
-                print(f"\n[WARNING] Detected action loop: action repeated {max_repeats} times")
-                print(f"[WARNING] Recent actions: {recent_actions[-4:]}")
+        # Check if we're in a TRUE loop: same action appearing consecutively 3+ times
+        # This allows legitimate recovery (same action with different world states)
+        if len(recent_actions) >= 3:
+            # Check last 3 actions are identical (consecutive repetition = true loop)
+            if (recent_actions[-1] == recent_actions[-2] == recent_actions[-3]):
+                print(f"\n[WARNING] Detected infinite loop: same action 3 times consecutively")
+                print(f"[WARNING] Recent actions: {recent_actions[-3:]}")
                 print("[INFO] Stopping execution to avoid infinite loop.")
                 print("=" * 80)
                 break
@@ -281,9 +313,17 @@ def run_simple_goals(scene, franka, BlocksState, goal_id, max_iterations=20):
             print(f"[EXEC] Action failed: {action}. Stopping execution loop.")
             break
 
-        # 7. Update physics (reduced from 80 to 40 for faster execution)
+        # 7. Update physics (allow blocks to settle)
+        # Use more steps to handle tower instability and prevent collapses
+        # Goal 2 needs extra settling for its 5-block tower
+        if goal_id == 2:
+            settling_steps = 200  # 5-block tower needs much more settling to prevent collapse
+        elif goal_id in [1, 3]:
+            settling_steps = 100
+        else:
+            settling_steps = 60
         try:
-            for _ in range(40):
+            for _ in range(settling_steps):
                 scene.step()
         except Exception as e:
             if "Viewer closed" in str(e):
@@ -334,14 +374,14 @@ def run_goal4(scene, franka, BlocksState):
             "goal_id": 41,
             "name": "Yellow Cross Tower",
             "description": "12 blocks in cross pattern, 2 layers",
-            "batch_size": 2,  # Small batch for tall structure
+            "batch_size": 1,  # Small batch for tall structure
             "max_iterations": 25,
         },
         {
             "goal_id": 42,
             "name": "Green Hollow Square",
             "description": "6 blocks in 3×3 hollow square, 1 layer",
-            "batch_size": 10,  # Large batch for flat structure
+            "batch_size": 1,  # Large batch for flat structure
             "max_iterations": 25,
         },
     ]
@@ -443,6 +483,13 @@ if __name__ == "__main__":
         default=20,
         help="Maximum iterations for simple goals (1-3)"
     )
+    parser.add_argument(
+        "--scene",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="Initial scene configuration for Goals 1-3 (1: scattered, 2: stacked tower)"
+    )
     args = parser.parse_args()
 
     # Initialize Genesis
@@ -450,11 +497,17 @@ if __name__ == "__main__":
     gs.init(backend=backend, logging_level='Warning', logger_verbose_time=False)
     print(f"\n[INFO] Genesis initialized (backend={args.backend})")
 
-    # Create scene based on goal
+    # Create scene based on goal and scene type
     if args.goal == 4:
         scene, franka_raw, BlocksState = create_scene_goal4_initial()
     else:
-        scene, franka_raw, BlocksState = create_scene_6blocks()
+        # Goals 1-3: support both initial scenes
+        if args.scene == 1:
+            print(f"[INFO] Using Scene 1: All blocks scattered on table")
+            scene, franka_raw, BlocksState = create_scene_6blocks()
+        else:  # args.scene == 2
+            print(f"[INFO] Using Scene 2: Six blocks pre-stacked in tower")
+            scene, franka_raw, BlocksState = create_scene_stacked()
 
     # Wrap robot in adapter
     franka = RobotAdapter(franka_raw, scene)

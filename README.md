@@ -16,8 +16,14 @@
 # Goal 1: Build two towers (RED-GREEN-BLUE, YELLOW-MAGENTA-CYAN)
 python3 demo.py --goal 1
 
+# Goal 1 from Scene 2 (pre-stacked tower)
+python3 demo.py --goal 1 --scene 2
+
 # Goal 2: Build single 6-block tower
 python3 demo.py --goal 2
+
+# Goal 2 from Scene 2 (pre-stacked tower)
+python3 demo.py --goal 2 --scene 2
 
 # Goal 3: Build alternative 6-block tower
 python3 demo.py --goal 3
@@ -210,6 +216,10 @@ python3 demo.py --goal 1 --backend cpu
 
 # Limit iterations (default: 20 for goals 1-3)
 python3 demo.py --goal 1 --max-iterations 15
+
+# Choose initial scene for Goals 1-3 (default: 1 = scattered)
+python3 demo.py --goal 1 --scene 1  # Scene 1: All blocks scattered on table
+python3 demo.py --goal 1 --scene 2  # Scene 2: Six blocks pre-stacked in tower
 ```
 
 ---
