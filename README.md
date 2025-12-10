@@ -2,10 +2,6 @@
 
 **A complete Task and Motion Planning (TAMP) system for robotic block manipulation**
 
-[![Status](https://img.shields.io/badge/status-production--ready-green)]()
-[![Goals](https://img.shields.io/badge/goals-1--4%20supported-blue)]()
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen)]()
-
 ---
 
 ## 🚀 Quick Start
