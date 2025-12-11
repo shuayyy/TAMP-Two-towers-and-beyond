@@ -285,7 +285,7 @@ class RobotAdapter:
     def move_to_pose(
         self,
         qpos_goal,
-        steps: int = 60,
+        steps: int = 30,
         ignore_collisions: bool = False,
     ):
         """
@@ -547,10 +547,10 @@ class RobotAdapter:
     def place(
         self,
         pos,
-        quat: np.ndarray = np.array([0.0, 1.0, 0.0, 0.0]),
+        quat: np.ndarray = np.array([0.0, 1.0, 0.0, 0.0]),  # [w,x,y,z]
         obj: Optional[Any] = None,
         hover_height: float = 0.08,
-        release_clearance: float = 0.012,   # release a few mm above target
+        release_clearance: float = 0.01,   # release a few mm above target
     ):
         """
         PLACE SEQUENCE (physics-based gripping; attach is only logical)
@@ -563,9 +563,57 @@ class RobotAdapter:
           3) Descend to a release height slightly above final Z
           4) Logical detach + open gripper (unlock fingers) + settling time
           5) Retreat upward (via OMPL)
+
+        During this place(), the gripper is rotated by +90° about WORLD Z
+        (quaternions assumed in [w, x, y, z] format).
         """
+
+        # ---------- local helpers for quaternion math (W, X, Y, Z) ----------
+        def quat_mul_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+            """
+            Hamilton product of two quaternions in [w, x, y, z] format.
+
+            q = q1 ⊗ q2
+            """
+            q1 = np.asarray(q1, dtype=float)
+            q2 = np.asarray(q2, dtype=float)
+
+            w1, x1, y1, z1 = q1
+            w2, x2, y2, z2 = q2
+
+            w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+            x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+            y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+            z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+
+            return np.array([w, x, y, z], dtype=float)
+
+        def rotate_quat_world_z_deg(quat_in: np.ndarray, angle_deg: float) -> np.ndarray:
+            """
+            Rotate `quat_in` by `angle_deg` about WORLD Z axis.
+            All quats are [w, x, y, z].
+
+            q_total = qz ⊗ quat_in
+            """
+            quat_in = np.asarray(quat_in, dtype=float)
+            angle = np.deg2rad(angle_deg)
+            half = 0.5 * angle
+            sin_half = np.sin(half)
+            cos_half = np.cos(half)
+
+            # rotation about WORLD Z: axis (0,0,1) → [w, x, y, z]
+            qz = np.array([cos_half, 0.0, 0.0, sin_half], dtype=float)
+
+            return quat_mul_wxyz(qz, quat_in)
+
+        # ---------- start of original logic ----------
         self.print_ee_pose("Before place()")
         pos = _to_np(pos).copy()
+
+        # Rotate desired orientation by +90° about WORLD Z
+        quat_place = rotate_quat_world_z_deg(quat, angle_deg=90.0)
+        print("[DEBUG] Original quat [w,x,y,z]:", quat)
+        print("[DEBUG] Place quat (+90° about WORLD Z):", quat_place)
 
         # === 1) target object center hover above final stack position ===
         pos_above_obj = pos.copy()
@@ -585,15 +633,15 @@ class RobotAdapter:
         q_above = self.inverse_kinematics(
             link=self.get_link("hand"),
             pos=target_hand_pos_above,
-            quat=quat,
+            quat=quat_place,
         )
         print("[DEBUG] Initial hover qpos:", q_above)
-        self.move_to_pose(q_above, steps=40)  # will be bumped to >=60 if grasping
+        self.move_to_pose(q_above, steps=40)
         self.print_ee_pose("[DEBUG] After initial hover move")
 
         # === 3) Iterative XY correction ===
         tol_xy = 2e-3      # 2 mm target
-        max_iters = 3
+        max_iters = 5
         stall_eps = 1e-6
         k_p = 1.5
         k_d = 0.18
@@ -657,9 +705,8 @@ class RobotAdapter:
             q_fix = self.inverse_kinematics(
                 link=hand,
                 pos=new_hand_pos,
-                quat=quat,
+                quat=quat_place,
             )
-            # slower when grasping (servo_to_q will scale steps)
             self._servo_to_q(q_fix, steps=40)
 
         # === 4) Descend to *release* height while still gripping ===
@@ -672,13 +719,13 @@ class RobotAdapter:
         q_final = self.inverse_kinematics(
             link=self.get_link("hand"),
             pos=final_hand_pos,
-            quat=quat,
+            quat=quat_place,
         )
         print("[DEBUG] Descend to release pose qpos:", q_final)
         self._servo_to_q(q_final, steps=80)
         self.print_ee_pose("[DEBUG] At release pose (attached by physics)")
 
-        # Logical detach, then open gripper (which UNLOCKS fingers)
+        # Logical detach, then open gripper
         if obj is not None and obj is self.attached_object:
             self.detach_object()
         elif obj is None and self.attached_object is not None:
@@ -706,16 +753,17 @@ class RobotAdapter:
 
         # === 5) Retreat upward so we don't collide with the stack ===
         pos_retreat = pos.copy()
-
         pos_retreat[2] += 0.30
+
         q_retreat = self.inverse_kinematics(
             link=self.get_link("hand"),
             pos=pos_retreat,
-            quat=quat,
+            quat=quat_place,
         )
         print("[DEBUG] move_to_pose retreat called, pos_retreat:", pos_retreat)
         self._servo_to_q(q_retreat, steps=40)
         self.print_ee_pose("After place()")
+
 
 
     
