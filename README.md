@@ -21,7 +21,7 @@ python3 demo.py --goal 2
 # Goal 2 from Scene 2 (pre-stacked tower)
 python3 demo.py --goal 2 --scene 2
 
-# Goal 3: Build alternative 6-block tower
+# Goal 3: Build 8-block tower (tallest possible - includes orange and purple blocks)
 python3 demo.py --goal 3
 
 # Goal 4: Build yellow cross + green hollow square (18 blocks)
@@ -199,7 +199,7 @@ python3 test_goals_simple.py
 |------|-------------|--------|---------|--------|
 | 1 | Two towers (RGB, YMC) | 6 | A* | ✅ Optimal |
 | 2 | Single 5-block tower | 6 | A* | ✅ Optimal |
-| 3 | Alternative tower | 6 | A* | ✅ Optimal |
+| 3 | Single 8-block tower (tallest) | 8 | A* | ✅ Optimal |
 | 4 | Yellow cross + Green square | 18 | EHC | ✅ Fast |
 
 ---

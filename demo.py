@@ -14,7 +14,7 @@ Usage:
 import argparse
 import numpy as np
 import genesis as gs
-from scenes import create_scene_6blocks, create_scene_stacked, create_scene_goal4_initial
+from scenes import create_scene_6blocks, create_scene_stacked, create_scene_8blocks, create_scene_goal4_initial
 from robot_adapter import RobotAdapter
 from symbolic_abstraction import abstract_state, visualize_predicates
 from task_planner import plan_symbolic
@@ -53,8 +53,13 @@ def print_block_positions(BlocksState, goal_id=1, label="[BLOCK POS]"):
                     pos = np.array(pos, dtype=float)
                 print(f"  {name.upper()} @ {pos}")
     else:
-        # Goals 1-3: 6 blocks (b, c, g, m, r, y)
-        for name in ["b", "c", "g", "m", "r", "y"]:
+        # Goals 1-2: 6 blocks (b, c, g, m, r, y)
+        # Goal 3: 8 blocks (b, c, g, m, r, y, o, p)
+        block_list = ["b", "c", "g", "m", "r", "y"]
+        if goal_id == 3:
+            block_list = ["b", "c", "g", "m", "r", "y", "o", "p"]
+
+        for name in block_list:
             if name in BlocksState:
                 obj = BlocksState[name]
                 pos = obj.get_pos()
@@ -500,8 +505,12 @@ if __name__ == "__main__":
     # Create scene based on goal and scene type
     if args.goal == 4:
         scene, franka_raw, BlocksState = create_scene_goal4_initial()
+    elif args.goal == 3:
+        # Goal 3: Use 8-block scene
+        print(f"[INFO] Using 8-block scene for Goal 3: All blocks scattered on table")
+        scene, franka_raw, BlocksState = create_scene_8blocks()
     else:
-        # Goals 1-3: support both initial scenes
+        # Goals 1-2: support both initial scenes
         if args.scene == 1:
             print(f"[INFO] Using Scene 1: All blocks scattered on table")
             scene, franka_raw, BlocksState = create_scene_6blocks()

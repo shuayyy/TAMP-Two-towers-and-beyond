@@ -3,6 +3,7 @@ from pathlib import Path
 
 # Must match your block names in blocks_state / abstract_state
 BLOCK_NAMES = ["r", "g", "b", "y", "m", "c"]
+BLOCK_NAMES_8 = ["r", "g", "b", "y", "m", "c", "o", "p"]  # 8 blocks for Goal 3
 
 DOMAIN_FILE = str(Path("pddl") / "domain_blocks.pddl")
 
@@ -60,7 +61,7 @@ def get_goal_predicates(goal_id: int) -> Set[Tuple]:
             ("handempty",),
         }
     elif goal_id == 3:
-        # Goal 3: (BONUS) 6-block tower (top→bottom: M-Y-B-R-G-C)
+        # Goal 3: 8-block tower - stack as tall as possible (top→bottom: P-O-M-Y-B-R-G-C)
         return {
             ("ontable", "c"),
             ("on", "g", "c"),
@@ -68,7 +69,9 @@ def get_goal_predicates(goal_id: int) -> Set[Tuple]:
             ("on", "b", "r"),
             ("on", "y", "b"),
             ("on", "m", "y"),
-            ("clear", "m"),
+            ("on", "o", "m"),
+            ("on", "p", "o"),
+            ("clear", "p"),
             ("handempty",),
         }
     elif goal_id == 41:
@@ -303,7 +306,11 @@ def make_problem_pddl(current_predicates: Set[Tuple],
     else:
         domain_name = "blocks"
         domain_file_name = "domain_blocks.pddl"
-        objects_str = " ".join(BLOCK_NAMES) + " - block"
+        # Use 8 blocks for Goal 3, 6 blocks for Goals 1-2
+        if goal_id == 3:
+            objects_str = " ".join(BLOCK_NAMES_8) + " - block"
+        else:
+            objects_str = " ".join(BLOCK_NAMES) + " - block"
         init_predicates = current_predicates
 
     # (b) Init: build from current_predicates
