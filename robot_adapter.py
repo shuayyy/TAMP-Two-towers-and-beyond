@@ -5,12 +5,13 @@ Features:
   • Transparent pass-through to underlying robot
   • OMPL motion planning bridge via PlannerInterface
   • move_to_pose(..., ignore_collisions=False)
-  • Physics-based gripping (no kinematic attach/detach)
+  • Kinematic gripping (block welded to hand while attached)
   • Logical attached_object for symbolic is_holding(...)
   • "Locked" fingers after closing (continuous grip in position mode)
   • Slower, smoother motions while grasping to reduce slip
-  • Neighbor-aware place(): auto-rotates gripper by 90° about world Z
-    depending on nearby blocks
+  • Neighbor-aware place():
+        For placing block at (x, y) and any neighbor at (a, b),
+        if |y - b| < 0.044 AND |x - a| < 0.010, rotate gripper by +90° about WORLD Z.
   • pick(pos, quat, obj=None) / place(pos, quat, obj=None)
 """
 
@@ -150,9 +151,11 @@ class RobotAdapter:
 
         # ------------------------------------------------------------------
         # Logical attachment state for symbolic is_holding(...)
-        # (NO kinematic weld; just a flag)
+        # plus kinematic weld data (pos/quat offsets)
         # ------------------------------------------------------------------
         self.attached_object: Optional[Any] = None
+        self._attach_offset_pos: Optional[np.ndarray] = None  # block in HAND frame
+        self._attach_offset_quat: Optional[np.ndarray] = None  # q_rel = q_h*conj(q_o)
 
     # ------------------------------------------------------------------
     # Transparent forwarding
@@ -191,7 +194,7 @@ class RobotAdapter:
         return self.robot.detect_collision(*a, **kw)
 
     # ------------------------------------------------------------------
-    # Blocks registration + neighbor logic
+    # Blocks registration + neighbor-orientation logic
     # ------------------------------------------------------------------
     def register_blocks(self, blocks: List[Any]):
         """
@@ -201,150 +204,180 @@ class RobotAdapter:
         self.blocks = list(blocks)
         print(f"[ROBOT][BLOCKS] Registered {len(self.blocks)} blocks.")
 
-    def _find_neighbor_block(
-        self,
-        target_pos,
-        radius: float = 0.06,   # ≈ 6 cm, a bit larger than one block
-        ignore_obj: Optional[Any] = None,
-    ) -> Optional[Any]:
-        """
-        Find the nearest *other* block around target_pos in XY within `radius`.
-
-        Returns:
-            Genesis entity for neighbor block, or None if none found.
-        """
-        if not self.blocks:
-            return None
-
-        target_pos = _to_np(target_pos)
-        best_block = None
-        best_dist = float("inf")
-
-        for b in self.blocks:
-            if ignore_obj is not None and b is ignore_obj:
-                continue
-
-            try:
-                p = _to_np(b.get_pos())
-            except Exception:
-                continue
-
-            d_xy = np.linalg.norm(p[:2] - target_pos[:2])
-            if d_xy < best_dist and d_xy < radius:
-                best_dist = d_xy
-                best_block = b
-
-        if best_block is not None:
-            print(
-                f"[NEIGHBOR] Found neighbor at d_xy={best_dist:.4f} m "
-                f"within radius={radius:.3f} m"
-            )
-        else:
-            print("[NEIGHBOR] No neighbor found within radius.")
-
-        return best_block
-
     def _choose_place_quat_from_neighbor(
         self,
         base_quat: np.ndarray,
         target_pos: np.ndarray,
-        neighbor_obj: Optional[Any] = None,
+        ignore_obj: Optional[Any] = None,
         extra_deg: float = 90.0,
     ) -> np.ndarray:
         """
-        Decide whether to keep `base_quat` as-is or rotate it by `extra_deg`
-        about WORLD Z, based purely on neighboring block pose.
+        Refined rule with both X and Y:
 
-        Heuristic:
-          - Compute the XY direction from target → neighbor
-          - Approximate the finger-closing axis in world (assume local +Y)
-          - Pick the orientation where that finger axis is MORE PERPENDICULAR
-            to the neighbor direction (smaller |dot|).
+          placing block at (x, y) and some neighbor at (a, b):
+
+            if there exists ANY neighbor with
+                |y - b| < 0.044   (4.4 cm in Y)
+            AND |x - a| < 0.010   (~1 cm in X, same column)
+            ⇒ rotate gripper by +extra_deg about WORLD Z.
+
+        We pick the neighbor with the smallest |y - b| under those thresholds.
+        If none satisfy the condition, keep base_quat.
         """
         base_quat = np.asarray(base_quat, dtype=float)
         target_pos = _to_np(target_pos)
 
-        if neighbor_obj is None:
-            # No neighbor: keep base orientation
+        if not self.blocks:
+            print("[PLACE-ORIENT] No blocks registered ⇒ keep base orientation.")
             return base_quat
 
-        try:
-            neighbor_pos = _to_np(neighbor_obj.get_pos())
-        except Exception:
+        x, y = float(target_pos[0]), float(target_pos[1])
+
+        dy_thresh = 0.044   # 4.4 cm in Y
+        dx_thresh = 0.010   # 1 cm in X (same column)
+
+        best_block = None
+        best_abs_dy = float("inf")
+        best_a = 0.0
+        best_b = 0.0
+        best_abs_dx = 0.0
+
+        print(f"[PLACE-ORIENT] Checking neighbors for target (x,y)=({x:.4f},{y:.4f})")
+
+        for blk in self.blocks:
+            if ignore_obj is not None and blk is ignore_obj:
+                # skip the block we're currently placing
+                continue
+
+            try:
+                p = _to_np(blk.get_pos())
+            except Exception:
+                continue
+
+            a, b = float(p[0]), float(p[1])
+            abs_dy = abs(y - b)
+            abs_dx = abs(x - a)
+
+            print(
+                f"[PLACE-ORIENT] candidate neighbor (a,b)=({a:.4f},{b:.4f}), "
+                f"|x-a|={abs_dx:.4f}, |y-b|={abs_dy:.4f}"
+            )
+
+            # must satisfy BOTH thresholds to be considered
+            if abs_dy < dy_thresh and abs_dx < dx_thresh and abs_dy < best_abs_dy:
+                best_abs_dy = abs_dy
+                best_abs_dx = abs_dx
+                best_block = blk
+                best_a = a
+                best_b = b
+
+        if best_block is None:
+            print(
+                "[PLACE-ORIENT] No neighbor with "
+                f"|y-b| < {dy_thresh:.3f} AND |x-a| < {dx_thresh:.3f} "
+                "⇒ keep base orientation."
+            )
             return base_quat
 
-        diff_xy = neighbor_pos[:2] - target_pos[:2]
-        norm_xy = float(np.linalg.norm(diff_xy))
-        if norm_xy < 1e-4:
-            # On top of each other; no real directional info
-            return base_quat
-        neighbor_dir = diff_xy / norm_xy
+        print(
+            f"[PLACE-ORIENT] Chosen neighbor (a,b)=({best_a:.4f},{best_b:.4f}), "
+            f"|x-a|={best_abs_dx:.4f}, |y-b|={best_abs_dy:.4f} "
+            f"⇒ rotate +{extra_deg}° about WORLD Z."
+        )
 
-        # Finger-closing axis in hand frame (assume +Y)
-        f_local = np.array([0.0, 1.0, 0.0], dtype=float)
-
-        # --- Candidate 1: base_quat as-is ---
-        R_base = quat_to_rot_wxyz(base_quat)
-        f_base_world = R_base @ f_local
-        f_base_xy = f_base_world[:2]
-        if np.linalg.norm(f_base_xy) < 1e-6:
-            score_base = 1.0
-        else:
-            f_base_xy /= np.linalg.norm(f_base_xy)
-            score_base = abs(float(np.dot(f_base_xy, neighbor_dir)))
-
-        # --- Candidate 2: base_quat rotated by +extra_deg about WORLD Z ---
         quat_rot = rotate_quat_world_z_deg(base_quat, extra_deg)
-        R_rot = quat_to_rot_wxyz(quat_rot)
-        f_rot_world = R_rot @ f_local
-        f_rot_xy = f_rot_world[:2]
-        if np.linalg.norm(f_rot_xy) < 1e-6:
-            score_rot = 1.0
-        else:
-            f_rot_xy /= np.linalg.norm(f_rot_xy)
-            score_rot = abs(float(np.dot(f_rot_xy, neighbor_dir)))
-
-        # Smaller score = more perpendicular to neighbor direction
-        if score_rot < score_base:
-            print(
-                f"[PLACE-ORIENT] Using rotated gripper (+{extra_deg}°); "
-                f"score_base={score_base:.3f}, score_rot={score_rot:.3f}"
-            )
-            return quat_rot
-        else:
-            print(
-                f"[PLACE-ORIENT] Keeping base orientation; "
-                f"score_base={score_base:.3f}, score_rot={score_rot:.3f}"
-            )
-            return base_quat
+        print("[PLACE-ORIENT] base_quat:", base_quat, "→ quat_rot:", quat_rot)
+        return quat_rot
 
     # ------------------------------------------------------------------
-    # Logical attach / detach (for symbolic is_holding, NO kinematic weld)
+    # Logical + kinematic attach / detach
     # ------------------------------------------------------------------
     def attach_object(self, obj: Any):
         """
-        Logically mark that the robot is holding `obj`.
-        No kinematic constraints are applied; used only by symbolic layer.
+        Logically and kinematically mark that the robot is holding `obj`.
+        We compute:
+          - _attach_offset_pos: block center in HAND frame
+          - _attach_offset_quat: relative orientation (q_h*conj(q_o))
+        Then _sync_attached_object() welds the block to the hand each step.
         """
         self.attached_object = obj
-        print(f"[ROBOT][ATTACH-LOGIC] attached_object set to {obj}")
+
+        hand = self.get_link("hand")
+        p_h = _to_np(hand.get_pos())
+        q_h = _to_np(hand.get_quat())
+        p_o = _to_np(obj.get_pos())
+        q_o = _to_np(obj.get_quat())
+
+        R_h = quat_to_rot_wxyz(q_h)
+
+        # block center in hand frame
+        self._attach_offset_pos = R_h.T @ (p_o - p_h)
+        # relative orientation: q_rel = conj(q_h) ⊗ q_o
+        self._attach_offset_quat = quat_mul_wxyz(
+            quat_conj_wxyz(q_h), q_o
+        )
+
+        # snap once immediately
+        self._sync_attached_object()
+
+        print(
+            "[ROBOT][ATTACH-LOGIC] attached_object set to",
+            obj,
+            "offset_pos (hand frame)=",
+            np.round(self._attach_offset_pos, 4),
+        )
 
     def detach_object(self):
         """
-        Logically mark that the robot is not holding anything.
+        Logically mark that the robot is not holding anything
+        and disable kinematic weld.
         """
-        print(f"[ROBOT][DETACH-LOGIC] clearing attached_object (was {self.attached_object})")
+        print(
+            "[ROBOT][DETACH-LOGIC] clearing attached_object (was",
+            self.attached_object,
+            ")",
+        )
         self.attached_object = None
+        self._attach_offset_pos = None
+        self._attach_offset_quat = None
+
+    def _sync_attached_object(self):
+        """
+        Kinematic weld: place object at hand pose + stored offset.
+        Called after each physics step while attached_object is valid.
+        """
+        if (
+            self.attached_object is None
+            or self._attach_offset_pos is None
+            or self._attach_offset_quat is None
+        ):
+            return
+
+        hand = self.get_link("hand")
+        p_h = _to_np(hand.get_pos())
+        q_h = _to_np(hand.get_quat())
+        R_h = quat_to_rot_wxyz(q_h)
+
+        # world pose of block
+        p_o = p_h + R_h @ self._attach_offset_pos
+        q_o = quat_mul_wxyz(q_h, self._attach_offset_quat)
+
+        try:
+            self.attached_object.set_pos(p_o)
+            self.attached_object.set_quat(q_o)
+        except Exception as e:
+            print("[ROBOT][SYNC] Could not kinematically sync attached object:", e)
 
     # ------------------------------------------------------------------
     # Helpers: stepping + "lock fingers"
     # ------------------------------------------------------------------
     def _step_scene(self, steps: int = 1):
-        """Step the simulator."""
+        """Step the simulator and enforce kinematic weld if attached."""
         if self.scene is None:
             return
         for _ in range(steps):
             self.scene.step()
+            self._sync_attached_object()
 
     def _maybe_lock_fingers(self, q) -> np.ndarray:
         """
@@ -389,16 +422,15 @@ class RobotAdapter:
         self._fingers_locked = False
         self._finger_lock_value = None
 
-        if self.scene is not None:
-            self._step_scene(steps)
+        self._step_scene(steps)
         self.print_ee_pose("After open_gripper()")
 
     def close_gripper(
         self,
         close_pos: float = 0.0,
         steps: int = 10,
-        squeeze_force: float = 150.0,  # tune up if needed
-        squeeze_steps: int = 100,
+        squeeze_force: float = 200.0,  # tune up if needed
+        squeeze_steps: int = 120,
     ):
         """
         Close parallel gripper with extra squeeze force on the 2 finger DOFs,
@@ -418,34 +450,30 @@ class RobotAdapter:
             self._finger_dofs,
         )
 
-        if self.scene is not None:
-            self._step_scene(steps)
+        self._step_scene(steps)
 
         print(
             f"[GRIP] Squeezing fingers with ramp 0 → {squeeze_force} "
             f"then hold for 20 steps (or less if needed), total {squeeze_steps} steps"
         )
 
-        if self.scene is not None:
-            # how many steps to ramp vs hold
-            hold_steps = min(20, squeeze_steps)
-            ramp_steps = max(squeeze_steps - hold_steps, 1)
+        # how many steps to ramp vs hold
+        hold_steps = min(20, squeeze_steps)
+        ramp_steps = max(squeeze_steps - hold_steps, 1)
 
-            # 1) ramp 0 → squeeze_force over ramp_steps
-            for i in range(ramp_steps):
-                alpha = (i + 1) / ramp_steps  # 0 → 1
-                f = alpha * squeeze_force
-                finger_force = np.array([-f, -f], dtype=float)
-                self.robot.control_dofs_force(finger_force, self._finger_dofs)
-                self._step_scene(1)
+        # 1) ramp 0 → squeeze_force over ramp_steps
+        for i in range(ramp_steps):
+            alpha = (i + 1) / ramp_steps  # 0 → 1
+            f = alpha * squeeze_force
+            finger_force = np.array([-f, -f], dtype=float)
+            self.robot.control_dofs_force(finger_force, self._finger_dofs)
+            self._step_scene(1)
 
-            # 2) hold full squeeze_force for the last hold_steps
-            for _ in range(hold_steps):
-                finger_force = np.array(
-                    [-squeeze_force, -squeeze_force], dtype=float
-                )
-                self.robot.control_dofs_force(finger_force, self._finger_dofs)
-                self._step_scene(1)
+        # 2) hold full squeeze_force for the last hold_steps
+        for _ in range(hold_steps):
+            finger_force = np.array([-squeeze_force, -squeeze_force], dtype=float)
+            self.robot.control_dofs_force(finger_force, self._finger_dofs)
+            self._step_scene(1)
 
         # After close, lock fingers in position space
         self._fingers_locked = True
@@ -475,8 +503,10 @@ class RobotAdapter:
             steps = max(steps, 60)
 
         qpos_start = _to_np(self.get_qpos())
-        print(f"[DEBUG] move_to_pose(): ignore_collisions={ignore_collisions}, "
-              f"num_waypoints={steps}")
+        print(
+            f"[DEBUG] move_to_pose(): ignore_collisions={ignore_collisions}, "
+            f"num_waypoints={steps}"
+        )
 
         if ignore_collisions:
             print(
@@ -503,8 +533,7 @@ class RobotAdapter:
             )
             q_goal = self._maybe_lock_fingers(qpos_goal)
             self.control_dofs_position(q_goal)
-            if self.scene is not None:
-                self._step_scene(100)
+            self._step_scene(100)
             return
 
         # OPTIONAL: subdivide between waypoints when grasping
@@ -522,8 +551,7 @@ class RobotAdapter:
         for waypoint in path:
             q = self._maybe_lock_fingers(waypoint)
             self.control_dofs_position(q)
-            if self.scene is not None:
-                self._step_scene(1)
+            self._step_scene(1)
 
         self.print_ee_pose("After move_to_pose()")
 
@@ -545,8 +573,7 @@ class RobotAdapter:
             q = (1.0 - alpha) * q_start + alpha * q_goal
             q = self._maybe_lock_fingers(q)
             self.control_dofs_position(q)
-            if self.scene is not None:
-                self._step_scene(1)
+            self._step_scene(1)
 
     def pre_grasp_pose(
         self,
@@ -627,8 +654,8 @@ class RobotAdapter:
           3) Slow vertical descent to grasp height
           4) Let contacts settle
           5) Close gripper (lock fingers closed)
-          6) Logically attach obj (for symbolic is_holding)
-          7) Slow retreat upward
+          6) Small test-lift; ONLY IF block lifts, attach_object(obj)
+          7) Retreat upward
 
         `pos` is the desired *block center* world position (4 cm cube).
         """
@@ -640,9 +667,14 @@ class RobotAdapter:
         hand_at_center[2] = target_grasp_z
 
         hand_link = self.get_link("hand")
-        cur = _to_np(hand_link.get_pos())
-        hand_at_center[0] = block_center[0]
-        hand_at_center[1] = block_center[1]
+
+        # For grasp success check, cache pre-grasp block pose
+        obj_pos_before = None
+        if obj is not None:
+            try:
+                obj_pos_before = _to_np(obj.get_pos())
+            except Exception as e:
+                print("[PICK] Could not read obj_pos_before:", e)
 
         self.print_ee_pose("Before pick()")
 
@@ -652,7 +684,7 @@ class RobotAdapter:
         print(f"[DEBUG] Pre-grasp hand target: {pregrasp_target}")
 
         qpos_pregrasp = self.inverse_kinematics(
-            link=self.get_link("hand"),
+            link=hand_link,
             pos=pregrasp_target,
             quat=quat,
         )
@@ -662,7 +694,6 @@ class RobotAdapter:
         self.open_gripper()
 
         # 3) SLOW VERTICAL DESCENT from pre-grasp to grasp height
-        hand_link = self.get_link("hand")
         current_hand_pos = _to_np(hand_link.get_pos())
         z_start = current_hand_pos[2]
         z_goal = hand_at_center[2] - 0.001
@@ -687,27 +718,54 @@ class RobotAdapter:
             )
             q_step = self._maybe_lock_fingers(q_step)
             self.control_dofs_position(q_step)
-
-            if self.scene is not None:
-                self._step_scene(1)
+            self._step_scene(1)
 
         # 4) Let contacts settle at final grasp pose
-        if self.scene is not None:
-            self._step_scene(30)  # ~0.5s depending on dt
+        self._step_scene(30)  # ~0.5s depending on dt
 
         # 5) Close gripper (now we are at grasp height) and LOCK fingers
         self.close_gripper()
 
-        # 6) Logically attach if provided (for symbolic is_holding)
-        if obj is not None:
-            self.attach_object(obj)
+        # 6) Small test-lift: attach ONLY IF block actually comes up
+        grasp_succeeded = False
+        if obj is not None and obj_pos_before is not None:
+            # target: small lift of the hand (e.g., +1.5 cm)
+            test_lift_target = hand_at_center.copy()
+            test_lift_target[2] += 0.015  # 1.5 cm up from grasp height
+            print(f"[PICK] Test-lift target hand pos: {test_lift_target}")
+
+            q_test_lift = self.inverse_kinematics(
+                link=hand_link,
+                pos=test_lift_target,
+                quat=quat,
+            )
+            self._servo_to_q(q_test_lift, steps=40)
+            self._step_scene(20)
+
+            try:
+                obj_pos_after = _to_np(obj.get_pos())
+                dz = float(obj_pos_after[2] - obj_pos_before[2])
+                print(f"[PICK] Test-lift dz for obj: {dz:.4f} m")
+
+                # threshold: block must move up at least 8 mm to consider grasp success
+                if dz > 0.008:
+                    print("[PICK] Grasp succeeded ⇒ attaching object.")
+                    self.attach_object(obj)
+                    grasp_succeeded = True
+                else:
+                    print("[PICK] Grasp failed (block did not lift) ⇒ NOT attaching.")
+            except Exception as e:
+                print("[PICK] Could not evaluate grasp success:", e)
+        else:
+            print("[PICK] Skipping grasp success check (no obj or no pre pose).")
 
         # 7) Retreat straight up (slow, to reduce slip)
+        #    (Even if grasp failed, we still move the hand up to clear the workspace.)
         retreat_target = hand_at_center + np.array(
             [0.0, 0.0, 2.0 * self.block_size]
         )
         qpos_retreat = self.inverse_kinematics(
-            link=self.get_link("hand"),
+            link=hand_link,
             pos=retreat_target,
             quat=quat,
         )
@@ -723,49 +781,54 @@ class RobotAdapter:
         quat: np.ndarray = np.array([0.0, 1.0, 0.0, 0.0]),  # [w,x,y,z]
         obj: Optional[Any] = None,
         hover_height: float = 0.08,
-        release_clearance: float = 0.015,  # release a few mm above target
+        release_clearance: float = 0.0,  # no free drop; drive to final Z
     ):
         """
-        PLACE SEQUENCE (physics-based grip; neighbor-aware orientation)
+        PLACE SEQUENCE (kinematically attached block + neighbor-aware orientation)
 
         `pos` is the desired object center at the final stack position.
 
         Steps:
-          1) Find neighbor based on geometry
-          2) Decide whether to rotate gripper by +90° about world Z
-          3) Move hand to hover above target (via OMPL, smoothed if grasping)
-          4) Iterative XY correction using object pose (if given)
-          5) Descend to a release height slightly above final Z
-          6) Open gripper (unlock fingers) + logically detach + settling time
-          7) Retreat upward
+          1) Decide orientation using neighbors and |y - b| / |x - a| rule
+          2) Move hand to hover above target (via OMPL, smoothed if grasping)
+          3) Iterative XY correction using object pose (if given)
+          4) Descend to final placement height (no free drop)
+          5) Open gripper (unlock fingers) + logically detach + settling time
+          6) Retreat upward
         """
         self.print_ee_pose("Before place()")
         pos = _to_np(pos).copy()
 
         base_quat = np.asarray(quat, dtype=float)
-
-        # --- purely geometric neighbor lookup (no TAMP) ---
-        neighbor = self._find_neighbor_block(target_pos=pos, ignore_obj=obj)
+        print("[DEBUG] Incoming base quat (w,x,y,z):", base_quat)
 
         # Decide whether to keep base_quat or rotate by +90° about WORLD Z
         quat_place = self._choose_place_quat_from_neighbor(
             base_quat=base_quat,
             target_pos=pos,
-            neighbor_obj=neighbor,
+            ignore_obj=obj,
             extra_deg=90.0,
         )
 
-        print("[DEBUG] Original quat [w,x,y,z]:", quat)
-        print("[DEBUG] Chosen place quat (maybe +90°):", quat_place)
+        print("[DEBUG] Final quat_place passed to IK:", quat_place)
 
         # === 1) target object center hover above final stack position ===
         pos_above_obj = pos.copy()
         pos_above_obj[2] += hover_height
 
-        # Approximate hand↔block offset (same geometry as in pick())
+        # Default approximate hand↔block offset (if no attach info)
         off = np.array([0.0, 0.0, -self.hand_to_block_center_z], dtype=float)
 
-        print("[DEBUG] assumed hand↔block offset:", np.round(off, 4))
+        # If we have a real measured attach offset, use that instead (world frame)
+        if (
+            obj is not None
+            and obj is self.attached_object
+            and self._attach_offset_pos is not None
+        ):
+            R_place = quat_to_rot_wxyz(quat_place)
+            off = R_place @ self._attach_offset_pos
+
+        print("[DEBUG] used hand↔block offset (world):", np.round(off, 4))
         print("[DEBUG] desired object pos:", np.round(pos, 4))
         print("[DEBUG] desired object pos above:", np.round(pos_above_obj, 4))
 
@@ -781,13 +844,12 @@ class RobotAdapter:
         self.move_to_pose(q_above, steps=40)
         self.print_ee_pose("[DEBUG] After initial hover move")
 
-        # === 3) Iterative XY correction (if obj is available) ===
-        tol_xy = 2e-3  # 2 mm target
-        max_iters = 4
+        # === 3) Iterative XY correction (adaptive step_max) ===
+        tol_xy = 1e-3      # 1 mm target
+        max_iters = 20
         stall_eps = 1e-6
-        k_p = 1.1
-        k_d = 0.0
-        step_max = 7e-1  # up to 7 mm per correction
+        k_p = 1.3
+        k_d = 0.18
 
         prev_err_xy = None
         prev_err_norm = None
@@ -802,8 +864,7 @@ class RobotAdapter:
                 except Exception:
                     obj_pos = ee_pos - off  # fallback guess
             else:
-                # if we don't have an object reference, approximate block center
-                obj_pos = ee_pos - off
+                obj_pos = ee_pos - off  # approximate block center
 
             target_xy = pos[:2]
             err_xy = target_xy - obj_pos[:2]
@@ -834,13 +895,17 @@ class RobotAdapter:
             prev_err_xy = err_xy.copy()
             prev_err_norm = err_norm
 
+            # adaptive step_max: big steps when far, tiny when close
+            adaptive = 0.3 * err_norm
+            step_max = min(0.02, max(0.001, adaptive))  # [1mm, 2cm]
+
             u_xy = k_p * err_xy + k_d * derr_xy
             dx = float(np.clip(u_xy[0], -step_max, step_max))
             dy = float(np.clip(u_xy[1], -step_max, step_max))
 
             print(
-                f"[CORRECTION {it}] Applying Δhand = "
-                f"({dx:+.6f}, {dy:+.6f})"
+                f"[CORRECTION {it}] step_max={step_max:.4f} "
+                f"Δhand=({dx:+.6f}, {dy:+.6f})"
             )
 
             new_hand_pos = ee_pos.copy()
@@ -855,11 +920,9 @@ class RobotAdapter:
             )
             self._servo_to_q(q_fix, steps=40)
 
-        # === 4) Descend to *release* height while still gripping ===
+        # === 4) Descend to *final* placement height (no free drop) ===
         final_obj_pos = pos.copy()
-        final_obj_pos[0] += 0.0085   # your tuned XY bias
-        final_obj_pos[1] += 0.002
-        final_obj_pos[2] += release_clearance
+        final_obj_pos[2] += release_clearance  # 0.0 by default
         final_hand_pos = final_obj_pos - off
 
         q_final = self.inverse_kinematics(
@@ -867,21 +930,18 @@ class RobotAdapter:
             pos=final_hand_pos,
             quat=quat_place,
         )
-        print("[DEBUG] Descend to release pose qpos:", q_final)
+        print("[DEBUG] Descend to final pose qpos:", q_final)
         self._servo_to_q(q_final, steps=80)
-        self.print_ee_pose("[DEBUG] At release pose (physics holding block)")
+        self.print_ee_pose("[DEBUG] At final pose (block kinematically attached)")
 
-        # 6) Open gripper to release (unlock fingers) and logically detach
+        # 5) Open gripper to release (unlock fingers) and logically detach
         self.open_gripper()
         if obj is not None and obj is self.attached_object:
             self.detach_object()
         elif obj is None and self.attached_object is not None:
-            # if we had something logically attached but caller omitted obj,
-            # still clear it so is_holding doesn't get stuck
             self.detach_object()
 
-        if self.scene is not None:
-            self._step_scene(30)
+        self._step_scene(30)
 
         try:
             if obj is not None:
@@ -897,7 +957,7 @@ class RobotAdapter:
         except Exception as e:
             print("[DEBUG] Could not read final object pose:", e)
 
-        # === 7) Retreat upward so we don't collide with the stack ===
+        # === 6) Retreat upward so we don't collide with the stack ===
         pos_retreat = pos.copy()
         pos_retreat[2] += 0.30
 
