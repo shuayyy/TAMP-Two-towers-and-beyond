@@ -12,17 +12,17 @@ import numpy as np
 
 # Physical constants (must match scenes.py)
 BLOCK_SIZE = 0.04  # 4cm cubes
-SPACING = 0.04     # 4cm between block centers - blocks touching
+SPACING = 0.042     # 4cm between block centers - blocks touching
 
 # Base coordinates for structures - BUILD ADJACENT
-YELLOW_BASE_X = 0.5  # Yellow cross center position
+YELLOW_BASE_X = 0.65  # Yellow cross center position
 YELLOW_BASE_Y = 0.0
-GREEN_BASE_X = 0.5   # Green square ADJACENT to yellow (same X)
+GREEN_BASE_X = 0.65   # Green square ADJACENT to yellow (same X)
 GREEN_BASE_Y = 0.25  # Offset in Y to be next to yellow cross (25cm separation)
 
 # Position tolerance for detecting if block is at a position
-POSITION_XY_THRESHOLD = 0.015  # 1.5cm tolerance in XY plane
-POSITION_Z_THRESHOLD = 0.01    # 1cm tolerance in Z
+POSITION_XY_THRESHOLD = 0.002 # 2mm tolerance in XY plane
+POSITION_Z_THRESHOLD = 0.002    # 2mm tolerance in Z
 
 
 # ===== POSITION COORDINATES MAPPING =====
