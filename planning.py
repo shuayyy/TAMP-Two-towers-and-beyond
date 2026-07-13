@@ -60,7 +60,7 @@ class PlannerInterface:
             smooth_path=True,
             num_waypoints=100,
             attached_object=None,
-            planner="RRTConnect",
+            planner="ABITstar",
     ):
         """
         Plan a path from `qpos_start` to `qpos_goal`.
@@ -277,3 +277,4 @@ class PlannerInterface:
         for i in range(self.robot.n_qs):
             tensor[i] = state[i]
         return tensor
+        

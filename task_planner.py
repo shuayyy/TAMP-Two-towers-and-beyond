@@ -24,13 +24,26 @@ from pathlib import Path
 
 from pddl.problem_generator import make_problem_pddl, DOMAIN_FILE
 
+# Domain file mapping for different goals
+def get_domain_file(goal_id: int) -> str:
+    """Return the appropriate domain file for the given goal_id."""
+    if goal_id in [4, 41, 42]:
+        return str(Path("pddl") / "domain_blocks_goal4.pddl")
+    else:
+        return DOMAIN_FILE
+
 
 Action = Tuple[str, ...]  # e.g. ("STACK", "r", "g")
 
 
-def run_pyperplan(domain_file: str, problem_file: str) -> str:
+def run_pyperplan(domain_file: str, problem_file: str, goal_id: int = 1) -> str:
     """
     Call pyperplan using its Python API directly.
+
+    Args:
+        domain_file: Path to PDDL domain file
+        problem_file: Path to PDDL problem file
+        goal_id: Goal identifier (used to select appropriate planner)
 
     Returns:
         plan_text: the plan actions (one action per line).
@@ -38,12 +51,18 @@ def run_pyperplan(domain_file: str, problem_file: str) -> str:
     try:
         # Import pyperplan modules
         from pyperplan import planner
-        from pyperplan.search import breadth_first_search
-        
-        print("[task_planner] Running pyperplan via Python API...")
-        
-        # Use pyperplan's search_plan function which returns a list of operators
-        plan = planner.search_plan(domain_file, problem_file, breadth_first_search, None)
+        from pyperplan.heuristics.relaxation import hFFHeuristic
+
+        # Use A* for optimal plans on small problems (Goals 1-3)
+        # Use Enforced Hill-Climbing for faster planning on large problems (Goal 4)
+        if goal_id in [4, 41, 42]:
+            from pyperplan.search import enforced_hillclimbing_search
+            print("[task_planner] Running pyperplan with Enforced Hill-Climbing (fast for Goal 4)...")
+            plan = planner.search_plan(domain_file, problem_file, enforced_hillclimbing_search, hFFHeuristic)
+        else:
+            from pyperplan.search import astar_search
+            print("[task_planner] Running pyperplan with A* (optimal for Goals 1-3)...")
+            plan = planner.search_plan(domain_file, problem_file, astar_search, hFFHeuristic)
         
         if plan is None:
             raise RuntimeError("Pyperplan returned no plan (unsolvable problem?)")
@@ -122,12 +141,16 @@ def parse_plan(plan_text: str) -> List[Action]:
         (stack r g)
         (pickup y)
         (stack y m)
-        ...
+
+        Goal 4 actions:
+        (putdown-at y1 pos_r1_c2_bottom)
+        (stack-at y3 y1 pos_r1_c2_bottom)
 
     We:
       - ignore empty lines and comment lines starting with ';'
       - expect each non-empty line to contain exactly one '(action ...)' term
-      - action name -> upper-case, args -> lower-case
+      - action name -> upper-case (PUTDOWN-AT), args -> lower-case
+      - supports variable-length arguments for Goal 4 position actions
     """
     plan: List[Action] = []
 
@@ -162,6 +185,95 @@ def parse_plan(plan_text: str) -> List[Action]:
     return plan
 
 
+def reorder_plan_by_layers(plan: List[Action]) -> List[Action]:
+    """
+    Reorder a plan to ensure bottom-layer blocks are placed before top-layer blocks.
+
+    For Goal 4 yellow cross structure:
+    - Bottom layer positions end with '_bottom'
+    - Top layer positions end with '_top'
+
+    Strategy: Group PICKUP + PUTDOWN/STACK pairs, then separate by layer.
+    """
+    bottom_layer_pairs = []  # [(PICKUP, PUTDOWN-AT/STACK-AT), ...]
+    top_layer_pairs = []
+    other_actions = []
+
+    i = 0
+    while i < len(plan):
+        action = plan[i]
+        action_name = action[0]
+
+        # Look for PICKUP followed by PUTDOWN-AT or STACK-AT
+        if action_name in ['PICKUP', 'PICKUP-AT']:
+            if i + 1 < len(plan):
+                next_action = plan[i + 1]
+                next_name = next_action[0]
+
+                if next_name == 'PUTDOWN-AT' and len(next_action) >= 3:
+                    position = next_action[2]
+                    pair = [action, next_action]
+                    if position.endswith('_bottom'):
+                        bottom_layer_pairs.append(pair)
+                    elif position.endswith('_top'):
+                        top_layer_pairs.append(pair)
+                    else:
+                        other_actions.extend(pair)
+                    i += 2  # Skip both actions
+                    continue
+
+                elif next_name == 'STACK-AT' and len(next_action) >= 5:
+                    top_position = next_action[4]
+                    pair = [action, next_action]
+                    if top_position.endswith('_top'):
+                        top_layer_pairs.append(pair)
+                    elif top_position.endswith('_bottom'):
+                        bottom_layer_pairs.append(pair)
+                    else:
+                        other_actions.extend(pair)
+                    i += 2  # Skip both actions
+                    continue
+
+        # If not part of a PICKUP+PLACE pair, add to others
+        other_actions.append(action)
+        i += 1
+
+    # Sort pairs by position for efficient execution
+    def get_position_key(pair):
+        """Extract position name from action pair for sorting."""
+        # pair is [PICKUP/PICKUP-AT, PUTDOWN-AT/STACK-AT]
+        place_action = pair[1]
+
+        if place_action[0] == 'PUTDOWN-AT' and len(place_action) >= 3:
+            return place_action[2]  # position name
+        elif place_action[0] == 'STACK-AT' and len(place_action) >= 5:
+            return place_action[4]  # top position name
+        return ""
+
+    # Sort bottom and top layer pairs by position name
+    # This groups adjacent positions together (e.g., r1_c2, r1_c3, then r2_c1, r2_c4, etc.)
+    bottom_layer_pairs.sort(key=get_position_key)
+    top_layer_pairs.sort(key=get_position_key)
+
+    # Flatten pairs back to action list
+    bottom_actions = [act for pair in bottom_layer_pairs for act in pair]
+    top_actions = [act for pair in top_layer_pairs for act in pair]
+
+    # Reconstruct: bottom layer first, then top layer, then others
+    reordered = bottom_actions + top_actions + other_actions
+
+    if len(bottom_layer_pairs) > 0 or len(top_layer_pairs) > 0:
+        print(f"[PLAN REORDER] Bottom layer action pairs: {len(bottom_layer_pairs)}")
+        print(f"[PLAN REORDER] Top layer action pairs: {len(top_layer_pairs)}")
+        print(f"[PLAN REORDER] Other actions: {len(other_actions)}")
+        if bottom_layer_pairs:
+            print(f"[PLAN REORDER] Bottom layer order: {[get_position_key(p) for p in bottom_layer_pairs]}")
+        if top_layer_pairs:
+            print(f"[PLAN REORDER] Top layer order: {[get_position_key(p) for p in top_layer_pairs]}")
+
+    return reordered
+
+
 def plan_symbolic(current_predicates: Set[Tuple],
                   goal_id: int,
                   problem_name: str = "demo_goal") -> List[Action]:
@@ -192,13 +304,17 @@ def plan_symbolic(current_predicates: Set[Tuple],
         problem_name=problem_name,
     )
 
-    print(f"[task_planner] Using DOMAIN:  {DOMAIN_FILE}")
+    # 2) Get the appropriate domain file for this goal
+    domain_file = get_domain_file(goal_id)
+
+    print(f"[task_planner] Using DOMAIN:  {domain_file}")
     print(f"[task_planner] Using PROBLEM: {problem_file}")
 
-    # 2) Run pyperplan (extracts plan from stdout or .soln) and read plan text
-    plan_text = run_pyperplan(DOMAIN_FILE, problem_file)
+    # 3) Run pyperplan (extracts plan from stdout or .soln) and read plan text
+    # Pass goal_id to select appropriate planner (A* for 1-3, EHC for 4)
+    plan_text = run_pyperplan(domain_file, problem_file, goal_id=goal_id)
 
-    # 3) Parse the plan text
+    # 4) Parse the plan text
     plan = parse_plan(plan_text)
 
     if not plan:
@@ -210,6 +326,13 @@ def plan_symbolic(current_predicates: Set[Tuple],
     print("[task_planner] Parsed plan:")
     for i, act in enumerate(plan):
         print(f"  {i}: {act}")
+
+    # 5) Reorder plan to ensure bottom-layer-first execution (Goal 4 only)
+    if goal_id in [4, 41, 42]:
+        plan = reorder_plan_by_layers(plan)
+        print("\n[task_planner] Reordered plan (bottom-layer first):")
+        for i, act in enumerate(plan):
+            print(f"  {i}: {act}")
 
     return plan
 
