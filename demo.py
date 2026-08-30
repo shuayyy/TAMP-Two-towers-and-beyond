@@ -394,13 +394,27 @@ def run_goal4(scene, franka, BlocksState):
     print("  - Green hollow square (6 blocks)")
     print("\n" + "=" * 80)
 
-    MAX_STEPS_PER_STRUCTURE = 25
-    ACTIONS_PER_BATCH = 16
+    MAX_STEPS_PER_STRUCTURE = 60
+    # Execute ONE action per perceive-plan cycle, exactly like goals 1-3 and exactly as
+    # the assignment specifies ("execute the first primitive ... re-ground and re-plan").
+    # This used to be 16: sixteen actions executed open-loop against a perception that
+    # aged sixteen actions. A PUTDOWN-AT aimed at a spot that an earlier action in the
+    # same batch had already disturbed drove cube into cube at full arm force -- measured
+    # flings of 2.2 m and 2.6 m (y5, y3) in one batch, which is what left the yellow
+    # cross unrecoverable. Closed-loop costs more planner calls (EHC is fast) and buys
+    # back every action operating on fresh state.
+    ACTIONS_PER_BATCH = 1
 
     # ---------------- PHASE 1: Yellow tower ----------------
     print("\n" + "=" * 80)
     print("PHASE 1: Building Yellow Cross Tower")
     print("=" * 80)
+
+    yellow_done = False
+    recent_actions = []  # same-action-3x abort, mirroring run_simple_goals: an action
+    # that keeps being replanned and keeps not changing the state (e.g. picking a block
+    # that physics has put permanently out of reach) would otherwise grind to the
+    # iteration cap -- observed as 53 consecutive PICKUPs of one flung block.
 
     for step_idx in range(MAX_STEPS_PER_STRUCTURE):
         print("\n" + "-" * 80)
@@ -421,6 +435,7 @@ def run_goal4(scene, franka, BlocksState):
 
         if not plan:
             print("\n[INFO] ✓ Yellow tower COMPLETE!")
+            yellow_done = True
             break
 
         print(f"\n[TASK PLAN] ({len(plan)} actions)")
@@ -428,6 +443,17 @@ def run_goal4(scene, franka, BlocksState):
             print(f"  {i}: {step}")
         if len(plan) > 5:
             print(f"  ... and {len(plan) - 5} more")
+
+        recent_actions.append(plan[0])
+        # Abort when the same action recurs 3x within the last 8 cycles. Plain
+        # 3-consecutive misses the observed failure shape: a placement that keeps being
+        # undone alternates PICKUP x / PUTDOWN-AT x / PICKUP x ... (g5 was re-placed 11
+        # times), which never puts three identical actions in a row.
+        if len([a for a in recent_actions[-8:] if a == plan[0]]) >= 3:
+            print(f"\n[WARNING] Action replanned 3x within 8 cycles with no lasting "
+                  f"effect: {plan[0]}")
+            print("[INFO] Aborting yellow phase to avoid an infinite loop.")
+            break
 
         actions_to_execute = plan[:ACTIONS_PER_BATCH]
         print(f"\n[BATCH EXECUTION] Executing {len(actions_to_execute)} actions...")
@@ -455,6 +481,7 @@ def run_goal4(scene, franka, BlocksState):
     print("PHASE 2: Building Green Hollow Square")
     print("=" * 80)
 
+    recent_actions = []
     for step_idx in range(MAX_STEPS_PER_STRUCTURE):
         print("\n" + "-" * 80)
         print(f"GREEN SQUARE - Iteration {step_idx}")
@@ -472,9 +499,17 @@ def run_goal4(scene, franka, BlocksState):
 
         if not plan:
             print("\n[INFO] ✓ Green square COMPLETE!")
-            print("\n" + "=" * 80)
-            print("GOAL 4 FULLY COMPLETED!")
-            print("=" * 80)
+            # "FULLY COMPLETED" used to print here unconditionally -- i.e. whenever the
+            # GREEN phase finished, even if the yellow phase had aborted. A success
+            # banner that does not check both structures is exactly the kind of
+            # self-report the verification standard bans.
+            if yellow_done:
+                print("\n" + "=" * 80)
+                print("GOAL 4 FULLY COMPLETED!")
+                print("=" * 80)
+            else:
+                print("\n[WARNING] Green square done, but the yellow phase did NOT "
+                      "complete — goal 4 is NOT fully achieved.")
             break
 
         print(f"\n[TASK PLAN] ({len(plan)} actions)")
@@ -482,6 +517,13 @@ def run_goal4(scene, franka, BlocksState):
             print(f"  {i}: {step}")
         if len(plan) > 5:
             print(f"  ... and {len(plan) - 5} more")
+
+        recent_actions.append(plan[0])
+        if len([a for a in recent_actions[-8:] if a == plan[0]]) >= 3:
+            print(f"\n[WARNING] Action replanned 3x within 8 cycles with no lasting "
+                  f"effect: {plan[0]}")
+            print("[INFO] Aborting green phase to avoid an infinite loop.")
+            break
 
         actions_to_execute = plan[:ACTIONS_PER_BATCH]
         print(f"\n[BATCH EXECUTION] Executing {len(actions_to_execute)} actions...")

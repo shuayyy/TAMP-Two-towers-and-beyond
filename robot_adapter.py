@@ -229,6 +229,47 @@ class RobotAdapter:
         self.blocks = list(blocks)
         print(f"[ROBOT][BLOCKS] Registered {len(self.blocks)} blocks.")
 
+    def _descent_blocked(self, target_pos, closing_axis_xy, ignore_obj) -> bool:
+        """Would descending the OPEN gripper at `target_pos`, with the fingers closing
+        along `closing_axis_xy`, strike a same-level neighbouring block?
+
+        Geometry: with the gripper open each fingertip sits ~0.04 m from the grasp
+        centre along the closing axis, and the finger body presents a cross-section of
+        roughly 26 mm (Panda finger; half-envelope 0.013 m). A neighbour cube (half
+        0.02 m) is struck when it overlaps the swept rectangle of either finger:
+            |along| in (0.04 - 0.033, 0.04 + 0.033)  and  |perp| < 0.033
+        where 0.033 = block_half + finger half-envelope.
+
+        Goal 4 places blocks 42 mm apart (2 mm face gap), so at every such placement
+        one wrist orientation descends a finger straight onto the neighbour and shoves
+        it ~30 mm off its position — measured: g5 placed to 1.39 mm error, then found
+        32 mm away after g6's placement beside it, and the pair ping-ponged forever.
+        """
+        target_pos = _to_np(target_pos)
+        ax = np.asarray(closing_axis_xy, dtype=float)
+        ax = ax / (np.linalg.norm(ax) + 1e-12)
+        perp_ax = np.array([-ax[1], ax[0]])
+
+        OPEN_HALF = 0.04           # fingertip offset from grasp centre when open
+        ENVELOPE = self.block_half + 0.013   # cube half-width + finger half-envelope
+        z = float(target_pos[2])
+
+        for blk in self.blocks:
+            if ignore_obj is not None and blk is ignore_obj:
+                continue
+            try:
+                p = _to_np(blk.get_pos())
+            except Exception:
+                continue
+            if abs(float(p[2]) - z) > 0.5 * self.block_size:
+                continue  # a level up/down (incl. the support) cannot meet the fingers
+            rel = p[:2] - target_pos[:2]
+            along = abs(float(np.dot(rel, ax)))
+            perp = abs(float(np.dot(rel, perp_ax)))
+            if perp < ENVELOPE and (OPEN_HALF - ENVELOPE) < along < (OPEN_HALF + ENVELOPE):
+                return True
+        return False
+
     def _choose_place_quat_from_neighbor(
         self,
         base_quat: np.ndarray,
@@ -237,94 +278,37 @@ class RobotAdapter:
         extra_deg: float = 90.0,
     ) -> np.ndarray:
         """
-        Refined rule with both X and Y:
+        Choose the wrist orientation whose OPEN-finger descent envelope does not strike
+        any same-level neighbouring block (see _descent_blocked for the geometry).
 
-          placing block at (x, y) and some neighbor at (a, b):
-
-            if there exists ANY neighbor with
-                |y - b| < 0.044   (4.4 cm in Y)
-            AND |x - a| < 0.010   (~1 cm in X, same column)
-            ⇒ rotate gripper by +extra_deg about WORLD Z.
-
-        We pick the neighbor with the smallest |y - b| under those thresholds.
-        If none satisfy the condition, keep base_quat.
+        With the base quat [0,1,0,0] the fingers close along WORLD Y; rotated +90 deg
+        about world Z they close along WORLD X. The previous rule here rotated when a
+        neighbour lay within |dy| < 0.044 and |dx| < 0.010 of the target -- a special
+        case of the footprint test that only understood one arrangement. At goal 4's
+        42 mm grid it chose orientations whose fingers descended onto the OTHER
+        neighbour, shoving placed blocks ~30 mm off their positions.
         """
         base_quat = np.asarray(base_quat, dtype=float)
         target_pos = _to_np(target_pos)
 
         if not self.blocks:
-            print("[PLACE-ORIENT] No blocks registered ⇒ keep base orientation.")
             return base_quat
 
-        x, y = float(target_pos[0]), float(target_pos[1])
+        blocked_base = self._descent_blocked(target_pos, (0.0, 1.0), ignore_obj)
+        blocked_rot = self._descent_blocked(target_pos, (1.0, 0.0), ignore_obj)
 
-        dy_thresh = 0.044   # 4.4 cm in Y
-        dx_thresh = 0.010   # 1 cm in X (same column)
-
-        best_block = None
-        best_abs_dy = float("inf")
-        best_a = 0.0
-        best_b = 0.0
-        best_abs_dx = 0.0
-
-        print(f"[PLACE-ORIENT] Checking neighbors for target (x,y)=({x:.4f},{y:.4f})")
-
-        z = float(target_pos[2])
-        # Only blocks at roughly the SAME height can foul the fingers. Anything a level
-        # or more below is either the support we are stacking onto or part of its column,
-        # 4 cm down, where the fingers never reach. Without this the support block itself
-        # matched at |dx|=|dy|=0.0000 and triggered the rotation on EVERY stack — visible
-        # in the logs as "Chosen neighbor ... |x-a|=0.0000, |y-b|=0.0000 => rotate +90".
-        # Half a block height is the natural cut: same-layer blocks pass, the support fails.
-        same_level_dz = 0.5 * self.block_size
-
-        for blk in self.blocks:
-            if ignore_obj is not None and blk is ignore_obj:
-                # skip the block we're currently placing
-                continue
-
-            try:
-                p = _to_np(blk.get_pos())
-            except Exception:
-                continue
-
-            if abs(float(p[2]) - z) > same_level_dz:
-                continue
-
-            a, b = float(p[0]), float(p[1])
-            abs_dy = abs(y - b)
-            abs_dx = abs(x - a)
-
-            print(
-                f"[PLACE-ORIENT] candidate neighbor (a,b)=({a:.4f},{b:.4f}), "
-                f"|x-a|={abs_dx:.4f}, |y-b|={abs_dy:.4f}"
-            )
-
-            # must satisfy BOTH thresholds to be considered
-            if abs_dy < dy_thresh and abs_dx < dx_thresh and abs_dy < best_abs_dy:
-                best_abs_dy = abs_dy
-                best_abs_dx = abs_dx
-                best_block = blk
-                best_a = a
-                best_b = b
-
-        if best_block is None:
-            print(
-                "[PLACE-ORIENT] No neighbor with "
-                f"|y-b| < {dy_thresh:.3f} AND |x-a| < {dx_thresh:.3f} "
-                "⇒ keep base orientation."
-            )
+        if not blocked_base:
+            if blocked_rot:
+                print("[PLACE-ORIENT] base orientation clear, rotated blocked ⇒ keep base.")
             return base_quat
+        if not blocked_rot:
+            print(f"[PLACE-ORIENT] base orientation would strike a neighbour ⇒ "
+                  f"rotate +{extra_deg}° about world Z.")
+            return rotate_quat_world_z_deg(base_quat, extra_deg)
 
-        print(
-            f"[PLACE-ORIENT] Chosen neighbor (a,b)=({best_a:.4f},{best_b:.4f}), "
-            f"|x-a|={best_abs_dx:.4f}, |y-b|={best_abs_dy:.4f} "
-            f"⇒ rotate +{extra_deg}° about WORLD Z."
-        )
-
-        quat_rot = rotate_quat_world_z_deg(base_quat, extra_deg)
-        print("[PLACE-ORIENT] base_quat:", base_quat, "→ quat_rot:", quat_rot)
-        return quat_rot
+        print("[PLACE-ORIENT] WARNING: both orientations strike a neighbour; keeping "
+              "base orientation. Expect contact.")
+        return base_quat
 
     # ------------------------------------------------------------------
     # Logical + kinematic attach / detach
@@ -663,6 +647,42 @@ class RobotAdapter:
                 continue
         return top_z + self.block_half + self.hand_to_block_center_z + self.block_half + margin
 
+    def _cartesian_transit(self, target_xy, quat, z: Optional[float] = None,
+                           step_m: float = 0.02, settle: int = 10):
+        """Carry the hand (and whatever it holds) to target_xy along a straight,
+        constant-height Cartesian line at the safe transit height.
+
+        Why not OMPL for the carry: the planner works in joint space and the HELD block
+        is not part of its collision model, so a planned-"valid" path is free to whip the
+        arm between distant waypoints or dip the carried block through standing
+        structures. Measured: g3 was grasped cleanly and then lost mid-transit of its own
+        place cycle -- the first post-transit reading put it 2.88 m away, behind the
+        robot. A straight line at a height where the carried block clears every other
+        block is collision-free by construction, and stepping it in 2 cm increments keeps
+        accelerations far below what the friction grasp can shed.
+        """
+        z = float(self._safe_transit_hand_z() if z is None else z)
+        hand = self.get_link("hand")
+        cur = _to_np(hand.get_pos())
+
+        # 1) vertical lift to transit height, if below it
+        if cur[2] < z - 1e-4:
+            q_up, _ = self._ik(np.array([cur[0], cur[1], z]), quat, label="transit-lift")
+            self._servo_to_q(q_up, steps=60)
+            cur = _to_np(hand.get_pos())
+
+        # 2) straight XY line at constant z, in small steps
+        start_xy = cur[:2].copy()
+        delta = np.asarray(target_xy, dtype=float) - start_xy
+        dist = float(np.linalg.norm(delta))
+        n = max(1, int(np.ceil(dist / step_m)))
+        for i in range(1, n + 1):
+            xy = start_xy + delta * (i / n)
+            q_i, _ = self._ik(np.array([xy[0], xy[1], z]), quat,
+                              label=f"transit-{i}/{n}")
+            self._servo_to_q(q_i, steps=8)
+        self._step_scene(settle)
+
     def _ik(self, pos, quat, label: str = ""):
         """Solve IK and return (qpos, position_residual_metres).
 
@@ -848,12 +868,10 @@ class RobotAdapter:
             q_lift, _ = self._ik(lift_here, quat, label="pick-lift-clear")
             self._servo_to_q(q_lift, steps=60)
 
-        over_block = pregrasp_target.copy()
-        over_block[2] = max(safe_z, pregrasp_target[2])
-        print(f"[DEBUG] Transit above block at z={over_block[2]:.4f}, "
+        print(f"[DEBUG] Cartesian transit above block at z={max(safe_z, pregrasp_target[2]):.4f}, "
               f"then pre-grasp at {pregrasp_target}")
-        q_over, _ = self._ik(over_block, quat, label="pick-transit")
-        self._servo_to_q(q_over, steps=100)
+        self._cartesian_transit(pregrasp_target[:2], quat,
+                                z=max(safe_z, pregrasp_target[2]))
 
         qpos_pregrasp, _ = self._ik(pregrasp_target, quat, label="pick-pregrasp")
         self._servo_to_q(qpos_pregrasp, steps=60)
@@ -1034,15 +1052,11 @@ class RobotAdapter:
                   f"{safe_z:.4f} so the carried block clears the tallest stack")
             target_hand_pos_above[2] = safe_z
 
-        # === 2) Move to hover pose via OMPL (coarse motion) ===
-        q_above = self.inverse_kinematics(
-            link=self.get_link("hand"),
-            pos=target_hand_pos_above,
-            quat=quat_place,
-        )
-        print("[DEBUG] Initial hover qpos:", q_above)
-        self.move_to_pose(q_above, steps=40)
-        self.print_ee_pose("[DEBUG] After initial hover move")
+        # === 2) Carry to the hover point: straight Cartesian line at the safe height ===
+        # (This replaced an OMPL joint-space move -- see _cartesian_transit for why.)
+        self._cartesian_transit(target_hand_pos_above[:2], quat_place,
+                                z=target_hand_pos_above[2])
+        self.print_ee_pose("[DEBUG] After transit to hover")
 
         # === 3) Iterative XY correction (adaptive step_max) ===
         tol_xy = 1e-3      # 1 mm target
@@ -1079,6 +1093,15 @@ class RobotAdapter:
             if err_norm < tol_xy:
                 print(f"[CORRECTION] Reached tolerance {tol_xy} m, stopping.")
                 break
+
+            if err_norm > 0.05 and obj is not None and obj is self.attached_object:
+                # An error this large at hover means the block is not in the fingers any
+                # more — correcting toward it just walks the empty hand across the table.
+                print(f"[CORRECTION] error {err_norm:.3f} m implies the grasp was lost — "
+                      f"abandoning this placement for replanning.")
+                self.open_gripper()
+                self.detach_object()  # align the logical state with the physical one
+                return
 
             if prev_err_norm is not None and abs(prev_err_norm - err_norm) < stall_eps:
                 print(
@@ -1124,19 +1147,58 @@ class RobotAdapter:
             print(f"[CORRECTION {it}] hand moved ({moved[0]:+.6f}, {moved[1]:+.6f}) "
                   f"vs commanded ({dx:+.6f}, {dy:+.6f}), ik_residual={ik_err*1000:.2f}mm")
 
-        # === 4) Descend to *final* placement height (no free drop) ===
+        # === 4) Descend to *final* placement height, with feedback at the bottom ===
+        #
+        # The XY correction above runs at HOVER height; the descent then used to be
+        # open-loop. At some arm poses the block shifts ~3 mm on the way down (measured:
+        # hover error 0.3 mm, landed error 2.9-3.3 mm), which is just over the 2 mm
+        # at-position threshold -- so the planner endlessly re-placed those blocks.
+        # The threshold is right; the descent needed closing the loop: measure at the
+        # bottom, and if off, lift a little and re-correct rather than releasing wrong.
         final_obj_pos = pos.copy()
         final_obj_pos[2] += release_clearance  # 0.0 by default
         final_hand_pos = final_obj_pos - off
 
-        q_final = self.inverse_kinematics(
-            link=self.get_link("hand"),
-            pos=final_hand_pos,
-            quat=quat_place,
-        )
-        print("[DEBUG] Descend to final pose qpos:", q_final)
-        self._servo_to_q(q_final, steps=80)
-        self.print_ee_pose("[DEBUG] At final pose (block kinematically attached)")
+        for attempt in range(3):
+            q_final, _ = self._ik(final_hand_pos, quat_place, label="place-final")
+            self._servo_to_q(q_final, steps=80)
+
+            if obj is None:
+                break
+            try:
+                obj_now = _to_np(obj.get_pos())
+            except Exception:
+                break
+            bottom_err = pos[:2] - obj_now[:2]
+            bottom_norm = float(np.linalg.norm(bottom_err))
+            print(f"[PLACE-BOTTOM {attempt}] XY error at final height = "
+                  f"{bottom_norm*1000:.2f} mm")
+            if bottom_norm <= 0.0015:
+                break
+
+            if bottom_norm > 0.05:
+                # A metre-scale (or even cm-scale) reading here does not mean
+                # "misaligned"; it means the block is NO LONGER IN THE GRIPPER.
+                # Chasing it with the corrective shift commanded hand positions metres
+                # outside the workspace (measured: a 7.5 m "error" applied as a shift).
+                # The honest response is to align the logical state with physics and let
+                # the closed-loop executive re-perceive and re-plan the pick.
+                print(f"[PLACE-BOTTOM] error {bottom_norm:.3f} m implies the grasp was "
+                      f"lost mid-place — abandoning this placement for replanning.")
+                self.open_gripper()
+                self.detach_object()
+                return
+
+            # Genuinely misaligned but still held: lift 3 cm, shift the hand by the
+            # measured error, and descend again.
+            lift = final_hand_pos.copy()
+            lift[2] += 0.03
+            q_lift, _ = self._ik(lift, quat_place, label="place-relift")
+            self._servo_to_q(q_lift, steps=40)
+            final_hand_pos[0] += float(bottom_err[0])
+            final_hand_pos[1] += float(bottom_err[1])
+
+        self.print_ee_pose("[DEBUG] At final pose")
 
         # 5) Open gripper to release (unlock fingers) and logically detach
         self.open_gripper()
