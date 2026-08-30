@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(conda run -n rbe550 python:*)",
+      "Bash(conda run -n rbe550 pip list:*)",
+      "Bash(conda run -n rbe550 pip show:*)",
+      "Bash(conda env list)",
+      "Bash(python:*)",
+      "Bash(pytest:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(wc:*)",
+      "Bash(file:*)",
+      "Bash(stat:*)",
+      "Bash(du:*)",
+      "Bash(df:*)",
+      "Bash(nproc)",
+      "Bash(free:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(ffprobe:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(mkdir:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git diff:*)",
+      "Bash(git blame:*)",
+      "Bash(git branch:*)",
+      "Bash(git remote:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git stash list)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [
+      "Bash(git reset --hard:*)",
+      "Bash(git checkout -- :*)",
+      "Bash(git checkout .:*)",
+      "Bash(git restore:*)",
+      "Bash(git clean:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(conda remove:*)",
+      "Bash(conda env remove:*)",
+      "Bash(pip uninstall:*)"
+    ]
+  },
+  "env": {
+    "TAMP_CONDA_ENV": "rbe550",
+    "TAMP_RUNS_DIR": "runs",
+    "PYTHONUNBUFFERED": "1"
+  }
+}

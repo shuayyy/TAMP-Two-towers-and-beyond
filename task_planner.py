@@ -318,10 +318,15 @@ def plan_symbolic(current_predicates: Set[Tuple],
     plan = parse_plan(plan_text)
 
     if not plan:
-        print("[task_planner] WARNING: Plan file parsed but no actions found.")
-        print("[task_planner] Raw plan content:")
-        print(plan_text)
-        raise RuntimeError("No actions parsed from plan output.")
+        # An empty plan is SUCCESS, not failure: pyperplan returns a zero-action plan when
+        # the goal already holds in the initial state. run_pyperplan() has already raised
+        # for the genuinely unsolvable case (search_plan returns None), so reaching here
+        # with no actions means there is nothing left to do.
+        #
+        # This used to raise, which made demo.py's "if not plan: GOAL REACHED" branch
+        # unreachable — every successful run was reported as a planning error.
+        print("[task_planner] Empty plan: goal already satisfied in the current state.")
+        return []
 
     print("[task_planner] Parsed plan:")
     for i, act in enumerate(plan):

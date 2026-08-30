@@ -12,9 +12,11 @@ Usage:
 """
 
 import argparse
+import os
 import numpy as np
 import genesis as gs
 
+import recording
 from scenes import (
     create_scene_6blocks,
     create_scene_stacked,
@@ -77,6 +79,74 @@ def print_block_positions(BlocksState, goal_id=1, label="[BLOCK POS]"):
     print()
 
 
+# Table-placement geometry for PUTDOWN.
+#
+# Blocks are 4 cm. Two blocks whose centres are 8 cm apart leave a 4 cm gap between
+# their faces, which clears the open gripper (measured finger span 0.08 m) so the arm can
+# place and later re-grasp without touching a neighbour.
+#
+# The reachable band comes from a measured sweep of the top-down grasp workspace: the
+# straight-down grasp reaches to about r = 0.79 m, so 0.72 m keeps a margin, and r < 0.32 m
+# runs into the robot's own base.
+PUTDOWN_CLEARANCE = 0.08
+PUTDOWN_R_MIN = 0.32
+PUTDOWN_R_MAX = 0.72
+TABLE_BLOCK_Z = BLOCK_SIZE / 2  # a 4 cm block resting on the table has its centre at 0.02
+
+
+def find_free_table_spot(BlocksState, moving_block):
+    """Pick a clear, reachable spot on the table to put `moving_block` down.
+
+    PUTDOWN used to send every block to a single hardcoded target, [0.55, 0, 0.05]. That
+    is wrong twice over: every putdown lands on whatever was put down before it, creating
+    an accidental stack that the planner then has to undo by putting the block back in the
+    same place (an infinite loop, observed), and z=0.05 drops a block whose resting centre
+    is 0.02 from 3 cm up, so it bounces and scatters. One such collision threw a block
+    0.84 m across the table.
+
+    A real robot picks an empty patch of table. This scans a grid and returns the
+    reachable candidate that is furthest from every other block, requiring at least
+    PUTDOWN_CLEARANCE between centres. Deterministic, so runs stay reproducible.
+    """
+    others = []
+    for name, obj in BlocksState.items():
+        if name == moving_block:
+            continue
+        try:
+            p = obj.get_pos().cpu().numpy()
+        except Exception:
+            p = np.array(obj.get_pos(), dtype=float)
+        others.append(p[:2])
+
+    best, best_score = None, -1.0
+    for x in np.arange(0.32, 0.721, 0.02):
+        for y in np.arange(-0.40, 0.501, 0.02):
+            r = float(np.hypot(x, y))
+            if r < PUTDOWN_R_MIN or r > PUTDOWN_R_MAX:
+                continue
+            if others:
+                d = min(float(np.hypot(x - o[0], y - o[1])) for o in others)
+            else:
+                d = 1.0
+            if d < PUTDOWN_CLEARANCE:
+                continue
+            # Prefer roomy spots, and among equals prefer closer to the robot (easier IK).
+            score = d - 0.15 * r
+            if score > best_score:
+                best_score, best = score, (float(x), float(y), d)
+
+    if best is None:
+        # No clear spot: report it rather than dropping the block onto a neighbour.
+        print(f"[PUTDOWN] WARNING: no free table spot with {PUTDOWN_CLEARANCE*100:.0f} cm "
+              f"clearance for '{moving_block}'; falling back to the least-bad candidate.")
+        return np.array([0.55, 0.0, TABLE_BLOCK_Z])
+
+    x, y, clearance = best
+    print(f"[PUTDOWN] free spot for '{moving_block}': ({x:.3f}, {y:.3f}) "
+          f"r={np.hypot(x, y):.3f} m, nearest block {clearance*100:.1f} cm away")
+    return np.array([x, y, TABLE_BLOCK_Z])
+
+
 def execute_action(franka, scene, BlocksState, action):
     """
     Execute a single action.
@@ -107,9 +177,9 @@ def execute_action(franka, scene, BlocksState, action):
         blk = args[0]
         obj = BlocksState[blk]
 
-        # For simple goals, you might want something smarter.
-        # For Goal 4, this is rarely used; PUTDOWN-AT is preferred.
-        target = np.array([0.55, 0.0, 0.05])
+        # Choose a clear, reachable patch of table rather than a fixed point, so
+        # successive putdowns cannot stack on or collide with each other.
+        target = find_free_table_spot(BlocksState, blk)
         print(f"[EXEC][PUTDOWN] {blk} at {target}")
         franka.place(target, obj=obj)
         return True
@@ -287,6 +357,7 @@ def run_simple_goals(scene, franka, BlocksState, goal_id, max_iterations=20):
         try:
             for _ in range(settling_steps):
                 scene.step()
+                recording.capture(scene)
         except Exception as e:
             if "Viewer closed" in str(e):
                 print("\n[INFO] Viewer was closed. Exiting demo.")
@@ -371,6 +442,7 @@ def run_goal4(scene, franka, BlocksState):
 
             for _ in range(20):
                 scene.step()
+                recording.capture(scene)
         else:
             # finished batch with no break, go to next outer iteration
             continue
@@ -424,6 +496,7 @@ def run_goal4(scene, franka, BlocksState):
 
             for _ in range(20):
                 scene.step()
+                recording.capture(scene)
         else:
             continue
 
@@ -461,7 +534,47 @@ if __name__ == "__main__":
         choices=[1, 2],
         help="Initial scene for Goals 1-3 (1: scattered, 2: stacked tower)",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without the interactive viewer and exit when finished (for automated verification)",
+    )
+    parser.add_argument(
+        "--video",
+        type=str,
+        default=None,
+        help="Path to write an mp4 of the run, e.g. runs/goal1/run.mp4",
+    )
+    parser.add_argument(
+        "--video-res",
+        type=str,
+        default="960x540",
+        help="Recording resolution as WxH (default 960x540)",
+    )
+    parser.add_argument(
+        "--video-every",
+        type=int,
+        default=4,
+        help=(
+            "Capture one frame every N simulation steps (default 4 = 25 fps of sim time). "
+            "Genesis buffers every frame in RAM until the video is encoded, so long runs "
+            "must use a larger value: goal 4 at the default was OOM-killed after ~25 min, "
+            "having buffered roughly 18000 frames (~12 GB at 640x360)."
+        ),
+    )
     args = parser.parse_args()
+
+    # Configure recording before the scene is built — scenes.py reads this to decide
+    # whether to open a viewer and whether to attach an offscreen camera.
+    _w, _h = (int(v) for v in args.video_res.lower().split("x"))
+    if args.video:
+        os.makedirs(os.path.dirname(os.path.abspath(args.video)), exist_ok=True)
+    recording.configure(
+        headless=args.headless,
+        video_path=args.video,
+        res=(_w, _h),
+        every=args.video_every,
+    )
 
     # Initialize Genesis
     backend = gs.gpu if args.backend == "gpu" else gs.cpu
@@ -481,6 +594,10 @@ if __name__ == "__main__":
         else:
             print("[INFO] Using Scene 2: Six blocks pre-stacked in tower")
             scene, franka_raw, BlocksState = create_scene_stacked()
+
+    # Begin recording (no-op unless --video was given). Must follow scene.build(),
+    # which the scene factories have already done.
+    recording.start(scene)
 
     # Wrap robot in adapter
     franka = RobotAdapter(franka_raw, scene)
@@ -510,10 +627,23 @@ if __name__ == "__main__":
             max_iterations=args.max_iterations,
         )
 
-    # Keep viewer open
-    print("\n[INFO] Keeping viewer open. Press Ctrl+C to exit.")
-    try:
-        while True:
-            scene.step()
-    except KeyboardInterrupt:
-        print("\n[INFO] Shutting down...")
+    # Let the structure settle so the recorded video ends on the final, settled state
+    # rather than mid-motion, then write the video out.
+    for _ in range(300):
+        scene.step()
+        recording.capture(scene)
+
+    video_path = recording.finish(scene)
+
+    if args.headless:
+        # Automated runs must terminate so the exit code is meaningful.
+        print("\n[INFO] Headless run complete.")
+        if video_path:
+            print(f"[INFO] Video: {video_path}")
+    else:
+        print("\n[INFO] Keeping viewer open. Press Ctrl+C to exit.")
+        try:
+            while True:
+                scene.step()
+        except KeyboardInterrupt:
+            print("\n[INFO] Shutting down...")
