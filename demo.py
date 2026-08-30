@@ -79,15 +79,8 @@ def print_block_positions(BlocksState, goal_id=1, label="[BLOCK POS]"):
     print()
 
 
-# Table-placement geometry for PUTDOWN.
-#
-# Blocks are 4 cm. Two blocks whose centres are 8 cm apart leave a 4 cm gap between
-# their faces, which clears the open gripper (measured finger span 0.08 m) so the arm can
-# place and later re-grasp without touching a neighbour.
-#
-# The reachable band comes from a measured sweep of the top-down grasp workspace: the
-# straight-down grasp reaches to about r = 0.79 m, so 0.72 m keeps a margin, and r < 0.32 m
-# runs into the robot's own base.
+# 8 cm between centres leaves a 4 cm gap, clearing the open gripper (span 0.08 m).
+# Reach band from a measured workspace sweep: top-down grasp reaches ~0.79 m.
 PUTDOWN_CLEARANCE = 0.08
 PUTDOWN_R_MIN = 0.32
 PUTDOWN_R_MAX = 0.72
@@ -97,16 +90,8 @@ TABLE_BLOCK_Z = BLOCK_SIZE / 2  # a 4 cm block resting on the table has its cent
 def find_free_table_spot(BlocksState, moving_block):
     """Pick a clear, reachable spot on the table to put `moving_block` down.
 
-    PUTDOWN used to send every block to a single hardcoded target, [0.55, 0, 0.05]. That
-    is wrong twice over: every putdown lands on whatever was put down before it, creating
-    an accidental stack that the planner then has to undo by putting the block back in the
-    same place (an infinite loop, observed), and z=0.05 drops a block whose resting centre
-    is 0.02 from 3 cm up, so it bounces and scatters. One such collision threw a block
-    0.84 m across the table.
-
-    A real robot picks an empty patch of table. This scans a grid and returns the
-    reachable candidate that is furthest from every other block, requiring at least
-    PUTDOWN_CLEARANCE between centres. Deterministic, so runs stay reproducible.
+    Scans a grid and returns the reachable candidate furthest from every other block.
+    Deterministic, so runs stay reproducible.
     """
     others = []
     for name, obj in BlocksState.items():
@@ -177,8 +162,7 @@ def execute_action(franka, scene, BlocksState, action):
         blk = args[0]
         obj = BlocksState[blk]
 
-        # Choose a clear, reachable patch of table rather than a fixed point, so
-        # successive putdowns cannot stack on or collide with each other.
+        # A clear patch, not a fixed point: successive putdowns must not stack.
         target = find_free_table_spot(BlocksState, blk)
         print(f"[EXEC][PUTDOWN] {blk} at {target}")
         franka.place(target, obj=obj)
@@ -395,14 +379,8 @@ def run_goal4(scene, franka, BlocksState):
     print("\n" + "=" * 80)
 
     MAX_STEPS_PER_STRUCTURE = 60
-    # Execute ONE action per perceive-plan cycle, exactly like goals 1-3 and exactly as
-    # the assignment specifies ("execute the first primitive ... re-ground and re-plan").
-    # This used to be 16: sixteen actions executed open-loop against a perception that
-    # aged sixteen actions. A PUTDOWN-AT aimed at a spot that an earlier action in the
-    # same batch had already disturbed drove cube into cube at full arm force -- measured
-    # flings of 2.2 m and 2.6 m (y5, y3) in one batch, which is what left the yellow
-    # cross unrecoverable. Closed-loop costs more planner calls (EHC is fast) and buys
-    # back every action operating on fresh state.
+    # One action per perceive-plan cycle, like goals 1-3. Batching 16 acted on
+    # perception that was 16 actions stale and drove cubes into each other.
     ACTIONS_PER_BATCH = 1
 
     # ---------------- PHASE 1: Yellow tower ----------------
@@ -411,10 +389,7 @@ def run_goal4(scene, franka, BlocksState):
     print("=" * 80)
 
     yellow_done = False
-    recent_actions = []  # same-action-3x abort, mirroring run_simple_goals: an action
-    # that keeps being replanned and keeps not changing the state (e.g. picking a block
-    # that physics has put permanently out of reach) would otherwise grind to the
-    # iteration cap -- observed as 53 consecutive PICKUPs of one flung block.
+    recent_actions = []
 
     for step_idx in range(MAX_STEPS_PER_STRUCTURE):
         print("\n" + "-" * 80)
@@ -445,10 +420,8 @@ def run_goal4(scene, franka, BlocksState):
             print(f"  ... and {len(plan) - 5} more")
 
         recent_actions.append(plan[0])
-        # Abort when the same action recurs 3x within the last 8 cycles. Plain
-        # 3-consecutive misses the observed failure shape: a placement that keeps being
-        # undone alternates PICKUP x / PUTDOWN-AT x / PICKUP x ... (g5 was re-placed 11
-        # times), which never puts three identical actions in a row.
+        # 3 recurrences in 8 cycles, not 3 in a row: livelocks alternate
+        # PICKUP x / PUTDOWN-AT x and never repeat consecutively.
         if len([a for a in recent_actions[-8:] if a == plan[0]]) >= 3:
             print(f"\n[WARNING] Action replanned 3x within 8 cycles with no lasting "
                   f"effect: {plan[0]}")
@@ -499,17 +472,14 @@ def run_goal4(scene, franka, BlocksState):
 
         if not plan:
             print("\n[INFO] ✓ Green square COMPLETE!")
-            # "FULLY COMPLETED" used to print here unconditionally -- i.e. whenever the
-            # GREEN phase finished, even if the yellow phase had aborted. A success
-            # banner that does not check both structures is exactly the kind of
-            # self-report the verification standard bans.
+            # Both structures must be done, not just this phase.
             if yellow_done:
                 print("\n" + "=" * 80)
                 print("GOAL 4 FULLY COMPLETED!")
                 print("=" * 80)
             else:
                 print("\n[WARNING] Green square done, but the yellow phase did NOT "
-                      "complete — goal 4 is NOT fully achieved.")
+                      "complete, so goal 4 is NOT fully achieved.")
             break
 
         print(f"\n[TASK PLAN] ({len(plan)} actions)")
@@ -606,7 +576,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Configure recording before the scene is built — scenes.py reads this to decide
+    # Configure recording before the scene is built; scenes.py reads this to decide
     # whether to open a viewer and whether to attach an offscreen camera.
     _w, _h = (int(v) for v in args.video_res.lower().split("x"))
     if args.video:
@@ -669,8 +639,7 @@ if __name__ == "__main__":
             max_iterations=args.max_iterations,
         )
 
-    # Let the structure settle so the recorded video ends on the final, settled state
-    # rather than mid-motion, then write the video out.
+    # Settle so the video ends on the final state, not mid-motion.
     for _ in range(300):
         scene.step()
         recording.capture(scene)

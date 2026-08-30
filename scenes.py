@@ -99,13 +99,8 @@ def create_scene_6blocks() -> Tuple[Any, Any, Dict[str, Any], Any]:
 
     franka_raw = scene.add_entity(
         gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
-        # The real Panda compensates gravity in its low-level controller, so commanded
-        # joint positions are held without a steady-state droop. Without that here the
-        # arm sags under its own weight: joint 2 (shoulder pitch, which carries the whole
-        # arm) settled 0.0158 rad BELOW every command, i.e. kp*err = 4500*0.0158 = 71 N.m
-        # against its 87 N.m limit — 82% saturated merely holding station. That 16 mrad
-        # droop swamps the millimetre-scale corrections place() issues, so the hand moved
-        # ~0.3% of what was commanded and the placement loop could never converge.
+        # The real Panda compensates gravity in its controller. Without this joint 2
+        # sags 0.0158 rad below every command, swamping millimetre corrections.
         material=gs.materials.Rigid(gravity_compensation=1.0),
     )
     franka = RobotAdapter(franka_raw, scene)
@@ -161,13 +156,8 @@ def create_scene_stacked() -> Tuple[Any, Any, Dict[str, Any], Any]:
 
     franka_raw = scene.add_entity(
         gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
-        # The real Panda compensates gravity in its low-level controller, so commanded
-        # joint positions are held without a steady-state droop. Without that here the
-        # arm sags under its own weight: joint 2 (shoulder pitch, which carries the whole
-        # arm) settled 0.0158 rad BELOW every command, i.e. kp*err = 4500*0.0158 = 71 N.m
-        # against its 87 N.m limit — 82% saturated merely holding station. That 16 mrad
-        # droop swamps the millimetre-scale corrections place() issues, so the hand moved
-        # ~0.3% of what was commanded and the placement loop could never converge.
+        # The real Panda compensates gravity in its controller. Without this joint 2
+        # sags 0.0158 rad below every command, swamping millimetre corrections.
         material=gs.materials.Rigid(gravity_compensation=1.0),
     )
     franka = RobotAdapter(franka_raw, scene)
@@ -246,13 +236,8 @@ def create_scene_8blocks() -> Tuple[Any, Any, Dict[str, Any]]:
 
     franka_raw = scene.add_entity(
         gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
-        # The real Panda compensates gravity in its low-level controller, so commanded
-        # joint positions are held without a steady-state droop. Without that here the
-        # arm sags under its own weight: joint 2 (shoulder pitch, which carries the whole
-        # arm) settled 0.0158 rad BELOW every command, i.e. kp*err = 4500*0.0158 = 71 N.m
-        # against its 87 N.m limit — 82% saturated merely holding station. That 16 mrad
-        # droop swamps the millimetre-scale corrections place() issues, so the hand moved
-        # ~0.3% of what was commanded and the placement loop could never converge.
+        # The real Panda compensates gravity in its controller. Without this joint 2
+        # sags 0.0158 rad below every command, swamping millimetre corrections.
         material=gs.materials.Rigid(gravity_compensation=1.0),
     )
     franka = RobotAdapter(franka_raw, scene)
@@ -339,13 +324,8 @@ def create_scene_goal4_initial() -> Tuple[Any, Any, Dict[str, Any]]:
     # Add robot
     franka_raw = scene.add_entity(
         gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
-        # The real Panda compensates gravity in its low-level controller, so commanded
-        # joint positions are held without a steady-state droop. Without that here the
-        # arm sags under its own weight: joint 2 (shoulder pitch, which carries the whole
-        # arm) settled 0.0158 rad BELOW every command, i.e. kp*err = 4500*0.0158 = 71 N.m
-        # against its 87 N.m limit — 82% saturated merely holding station. That 16 mrad
-        # droop swamps the millimetre-scale corrections place() issues, so the hand moved
-        # ~0.3% of what was commanded and the placement loop could never converge.
+        # The real Panda compensates gravity in its controller. Without this joint 2
+        # sags 0.0158 rad below every command, swamping millimetre corrections.
         material=gs.materials.Rigid(gravity_compensation=1.0),
     )
     franka = RobotAdapter(franka_raw, scene)

@@ -1,18 +1,20 @@
 """
 RobotAdapter: a thin adapter around a Genesis robot entity.
 
-Features:
-  • Transparent pass-through to underlying robot
-  • OMPL motion planning bridge via PlannerInterface
-  • move_to_pose(..., ignore_collisions=False)
-  • Kinematic gripping (block welded to hand while attached)
-  • Logical attached_object for symbolic is_holding(...)
-  • "Locked" fingers after closing (continuous grip in position mode)
-  • Slower, smoother motions while grasping to reduce slip
-  • Neighbor-aware place():
-        For placing block at (x, y) and any neighbor at (a, b),
-        if |y - b| < 0.044 AND |x - a| < 0.010, rotate gripper by +90° about WORLD Z.
+Grasping is real: the block is held by contact friction between the fingers, never
+welded or teleported. attached_object is bookkeeping only, set after pick() confirms by
+test-lift that the block actually came up, and cleared if the grasp is later lost.
+
+  • Transparent pass-through to the underlying robot
   • pick(pos, quat, obj=None) / place(pos, quat, obj=None)
+  • Wrist-tilt ladder so blocks past the ~0.79 m top-down grasp radius stay reachable
+  • Carries along straight Cartesian lines at a height that clears every other block,
+    because OMPL cannot see the cube in the gripper
+  • Chooses the place orientation whose open-finger footprint misses same-level
+    neighbours, which matters at goal 4's 2 mm face gaps
+  • Closed-loop placement: XY corrected at hover AND re-checked at final height before
+    release; a metre-scale error means the grasp was lost, not that we are misaligned
+  • Fingers held closed in position control for the whole carry
 """
 
 from typing import Any, Optional, List
@@ -103,16 +105,9 @@ def quat_about_axis(axis, angle_deg: float) -> np.ndarray:
     return np.array([np.cos(half), *(np.sin(half) * axis)])
 
 
-# Wrist tilts tried, in order, when reaching for a block. A straight-down grasp cannot
-# reach past a radius of about 0.79 m (measured), but scenes.py spawns block B at
-# (0.65, 0.40) +/- 0.05, i.e. as far as 0.832 m. Leaning the fingers outward puts the
-# hand hand_to_block_center_z*sin(tilt) CLOSER to the base while the grasp centre still
-# lands on the block, which is what a real arm does at the edge of its workspace.
-#
-# Measured at (0.700, 0.450), r = 0.832 m: straight down misses by 35 mm and closes on
-# empty air, while 15/25/35 degrees all reach (IK residual < 0.2 mm) and lift the cube
-# 138-156 mm. Rotating the gripper 90 degrees about its own axis fails at every tilt, so
-# the yaw is left alone.
+# Straight-down grasp reaches only ~0.79 m but blocks spawn as far as 0.832 m. Leaning
+# the fingers outward puts the hand closer to the base while the grasp centre still
+# lands on the block. Yaw is left alone: rotating 90 deg fails at every tilt.
 GRASP_TILTS_DEG = (0.0, 15.0, 25.0, 35.0)
 
 
@@ -147,44 +142,26 @@ class RobotAdapter:
         print("[DEBUG] arm dofs   :", self._arm_dofs)
         print("[DEBUG] finger dofs:", self._finger_dofs)
 
-        # ------------------------------------------------------------------
-        # Block geometry: 4 cm cube
-        # ------------------------------------------------------------------
         self.block_size = 0.04  # meters
         self.block_half = 0.5 * self.block_size
 
-        # ------------------------------------------------------------------
-        # Vertical offsets:
-        #  - hand_to_finger_tip_z: measured (12 cm)
-        #  - hand_to_block_center_z: where block center should be when fingers
-        #    are gripping at mid-height
-        # ------------------------------------------------------------------
+        # Grasp height: commanding the hand to block_z + 0.10 seats the fingers on a
+        # table cube (measured width 0.0396). True fingertip offset is 0.1124.
         self.hand_to_finger_tip_z = 0.12
         self.hand_to_block_center_z = self.hand_to_finger_tip_z - self.block_half
-        # = 0.12 - 0.02 = 0.10 m
 
-        # ------------------------------------------------------------------
-        # "Locked fingers" state: keep fingers closed after grasp
-        # ------------------------------------------------------------------
+        # Keep fingers closed after grasp
         self._fingers_locked: bool = False
         self._finger_lock_value: Optional[float] = None  # scalar for last 2 DOFs
 
-        # ------------------------------------------------------------------
-        # Blocks list for neighbor search (purely geometric, no TAMP)
-        # ------------------------------------------------------------------
+        # Registered for neighbour search during placement
         self.blocks: List[Any] = []
 
-        # ------------------------------------------------------------------
-        # Logical attachment state for symbolic is_holding(...)
-        # plus kinematic weld data (pos/quat offsets)
-        # ------------------------------------------------------------------
+        # Which block we are holding, and its measured offset in the hand frame
         self.attached_object: Optional[Any] = None
         self._attach_offset_pos: Optional[np.ndarray] = None  # block in HAND frame
         self._attach_offset_quat: Optional[np.ndarray] = None  # q_rel = q_h*conj(q_o)
 
-    # ------------------------------------------------------------------
-    # Transparent forwarding
-    # ------------------------------------------------------------------
     def __getattr__(self, name: str) -> Any:
         """Forward unknown attribute access to the underlying robot."""
         return getattr(self.robot, name)
@@ -240,10 +217,8 @@ class RobotAdapter:
             |along| in (0.04 - 0.033, 0.04 + 0.033)  and  |perp| < 0.033
         where 0.033 = block_half + finger half-envelope.
 
-        Goal 4 places blocks 42 mm apart (2 mm face gap), so at every such placement
-        one wrist orientation descends a finger straight onto the neighbour and shoves
-        it ~30 mm off its position — measured: g5 placed to 1.39 mm error, then found
-        32 mm away after g6's placement beside it, and the pair ping-ponged forever.
+        Goal 4 places blocks 42 mm apart, so at those positions one orientation always
+        descends a finger onto the neighbour and knocks it off its spot.
         """
         target_pos = _to_np(target_pos)
         ax = np.asarray(closing_axis_xy, dtype=float)
@@ -278,15 +253,11 @@ class RobotAdapter:
         extra_deg: float = 90.0,
     ) -> np.ndarray:
         """
-        Choose the wrist orientation whose OPEN-finger descent envelope does not strike
-        any same-level neighbouring block (see _descent_blocked for the geometry).
+        Choose the wrist orientation whose open-finger descent envelope does not strike
+        a same-level neighbour (see _descent_blocked for the geometry).
 
-        With the base quat [0,1,0,0] the fingers close along WORLD Y; rotated +90 deg
-        about world Z they close along WORLD X. The previous rule here rotated when a
-        neighbour lay within |dy| < 0.044 and |dx| < 0.010 of the target -- a special
-        case of the footprint test that only understood one arrangement. At goal 4's
-        42 mm grid it chose orientations whose fingers descended onto the OTHER
-        neighbour, shoving placed blocks ~30 mm off their positions.
+        With the base quat [0,1,0,0] the fingers close along world Y; rotated +90 deg
+        about world Z they close along world X.
         """
         base_quat = np.asarray(base_quat, dtype=float)
         target_pos = _to_np(target_pos)
@@ -314,18 +285,10 @@ class RobotAdapter:
     # Logical + kinematic attach / detach
     # ------------------------------------------------------------------
     def attach_object(self, obj: Any):
-        """
-        Record that the robot is holding `obj`, and measure how it is being held.
+        """Record that the robot is holding `obj`, and measure how it is being held.
 
-        This is bookkeeping, not actuation — the object is held by the gripper's contact
-        friction, and nothing here moves it. It is only set after pick() has confirmed by
-        test-lift that the block actually came up with the hand.
-
-        We measure:
-          - _attach_offset_pos: block centre in the HAND frame
-          - _attach_offset_quat: relative orientation (conj(q_h) * q_o)
-        place() aims with these, and _sync_attached_object() keeps them current as the
-        block shifts in the fingers during transport.
+        Bookkeeping, not actuation. Set only after pick() confirms by test-lift that the
+        block came up. place() aims with the measured offset.
         """
         self.attached_object = obj
 
@@ -366,27 +329,10 @@ class RobotAdapter:
         self._attach_offset_quat = None
 
     def _sync_attached_object(self):
-        """Refresh the MEASURED hand->object offset from the simulation.
+        """Refresh the measured hand->object offset. Observes only; never writes a pose.
 
-        This used to be a kinematic weld: it wrote the object's pose every step, so the
-        block moved because we teleported it, not because the gripper held it. Two
-        consequences made that fatal rather than merely dishonest:
-
-          * every grasp appeared to succeed, since the block followed the hand whether
-            or not the fingers had any purchase on it;
-          * place() could not steer the block at all. The block was rigidly pinned to a
-            fixed offset from the hand, recomputed each step from the hand's ACTUAL
-            orientation, while place() aimed using the COMMANDED orientation. As the two
-            diverged the block swung, and the XY correction loop chased a target it
-            structurally could not reach — measured error grew 3.2mm -> 8.5mm over ten
-            iterations instead of converging to its 1mm tolerance.
-
-        The grasp is now carried by real contact friction. Verified in isolation: the
-        Franka lifts a 4 cm, 12.8 g cube 150 mm with the fingers simply position-closed
-        onto it, at Genesis' default friction and with no weld.
-
-        So this method now only OBSERVES. It keeps the offset in sync with where the
-        block actually is relative to the hand, which is what place() needs to aim with.
+        The grasp is carried by contact friction, verified in isolation: the Franka
+        lifts a 4 cm, 12.8 g cube 150 mm with the fingers position-closed onto it.
         """
         if self.attached_object is None:
             return
@@ -461,26 +407,12 @@ class RobotAdapter:
         self.print_ee_pose("After open_gripper()")
 
     def close_gripper(self, close_pos: float = 0.0, settle_steps: int = 60):
-        """
-        Close the parallel gripper onto the object using position control only.
+        """Close the gripper onto the object using position control only.
 
-        Why position control and not a force squeeze:
-
-        This previously issued control_dofs_position AND ramped control_dofs_force to the
-        same two finger DOFs. Those are competing control modes on one DOF, and the force
-        ramp won. At the 200 N it ramped to, the fingers drove straight through the cube:
-        measured in isolation, force-closing at only 20 N ends with the finger joints at
-        width = -0.0006 m (past closed) and the cube squirting out and being DROPPED.
-
-        Position-closing is both simpler and physically right. Commanding the fingers to
-        close_pos stalls them against the object: the fingers settle at width = 0.0396 m
-        on a 0.04 m cube, and the PD controller (kp = 100) working against the +/-100 N
-        finger force range supplies the contact normal force.
-
-        Force balance: the cube is 0.04^3 m^3 at Genesis' default rho = 200 kg/m^3, so
-        12.8 g, i.e. 0.126 N of weight. Holding it needs 2 * mu * N > 0.126 N, so barely
-        0.063 N of normal force per finger at mu = 1.0. The stalled PD contact supplies
-        orders of magnitude more. Verified end to end: a 150 mm lift with the cube held.
+        A force squeeze fights the position controller on the same DOFs and wins: at
+        20 N the fingers close past the cube (width -0.0006 m) and drop it. Position
+        control stalls them against the object at width 0.0396 m on a 4 cm cube, which
+        is ample: the cube weighs 0.126 N and needs 0.063 N per finger at mu = 1.
         """
         self.print_ee_pose("Before close_gripper()")
 
@@ -501,7 +433,7 @@ class RobotAdapter:
         print(f"[GRIP] Closed onto object: finger width = {width:.4f} m "
               f"(a seated 4 cm cube reads ~0.040)")
 
-        # Keep commanding closed for the rest of the carry — this is the continuous grip.
+        # Keep commanding closed for the rest of the carry: this is the continuous grip.
         self._fingers_locked = True
         self._finger_lock_value = float(close_pos)
 
@@ -584,10 +516,8 @@ class RobotAdapter:
     def _select_grasp_pose(self, block_center, base_quat):
         """Pick the least-tilted wrist pose whose IK actually reaches `block_center`.
 
-        Returns (hand_pos, quat, tilt_deg). Tilt 0 reproduces the original straight-down
-        grasp exactly, so nothing changes for blocks that were always reachable; the
-        larger tilts only come into play at the edge of the workspace, where a
-        straight-down grasp silently fails and shoves the block further out of reach.
+        Returns (hand_pos, quat, tilt_deg). Tilt 0 is a plain straight-down grasp; the
+        larger tilts only apply at the edge of the workspace.
         """
         block_center = _to_np(block_center)
         bx, by, bz = float(block_center[0]), float(block_center[1]), float(block_center[2])
@@ -623,19 +553,11 @@ class RobotAdapter:
         return hand_pos, quat, tilt
 
     def _safe_transit_hand_z(self, margin: float = 0.03) -> float:
-        """Hand height at which a CARRIED block clears every other block in the scene.
+        """Hand height at which a carried block clears every other block in the scene.
 
-        OMPL checks the robot for collisions but knows nothing about the cube held in the
-        gripper, so a planned-"free" transit can drag that cube straight through a stack.
-        The carried cube's underside sits hand_to_block_center_z + block_half = 0.12 m
-        below the hand frame, while pick() used to retreat to only block_z + 0.18, putting
-        the carried cube at z ~ 0.107. Scene 2 starts with a six-block tower topping out at
-        z = 0.22, so the transit ploughed through it: the penetration impulse threw the
-        held block 2.10 m across the table (measured, R ended at [-0.094, 2.096]).
-
-        Real pick-and-place lifts above the tallest obstacle before translating. This
-        returns that height: the top of the tallest other block, plus half a block to
-        clear its upper face, plus the hand-to-underside distance, plus a margin.
+        OMPL collision-checks the robot but not the cube in the gripper, so transits must
+        stay above the tallest stack. The carried cube's underside sits 0.12 m below the
+        hand frame; add half a block to clear the obstacle's top face, plus a margin.
         """
         top_z = self.block_half  # bare table
         for blk in self.blocks:
@@ -649,17 +571,12 @@ class RobotAdapter:
 
     def _cartesian_transit(self, target_xy, quat, z: Optional[float] = None,
                            step_m: float = 0.02, settle: int = 10):
-        """Carry the hand (and whatever it holds) to target_xy along a straight,
-        constant-height Cartesian line at the safe transit height.
+        """Carry the hand to target_xy along a straight Cartesian line at transit height.
 
-        Why not OMPL for the carry: the planner works in joint space and the HELD block
-        is not part of its collision model, so a planned-"valid" path is free to whip the
-        arm between distant waypoints or dip the carried block through standing
-        structures. Measured: g3 was grasped cleanly and then lost mid-transit of its own
-        place cycle -- the first post-transit reading put it 2.88 m away, behind the
-        robot. A straight line at a height where the carried block clears every other
-        block is collision-free by construction, and stepping it in 2 cm increments keeps
-        accelerations far below what the friction grasp can shed.
+        OMPL plans in joint space and cannot see the held block, so its paths can swing
+        the arm wide or dip the cube through a stack. A straight line above everything is
+        collision-free by construction, and 2 cm steps keep accelerations low enough that
+        the friction grasp holds.
         """
         z = float(self._safe_transit_hand_z() if z is None else z)
         hand = self.get_link("hand")
@@ -686,11 +603,8 @@ class RobotAdapter:
     def _ik(self, pos, quat, label: str = ""):
         """Solve IK and return (qpos, position_residual_metres).
 
-        Genesis' inverse_kinematics returns a best-effort qpos even when it fails to
-        converge — its own pos_tol is 0.5 mm — and it only reports that failure if you
-        ask with return_error=True. Every call site here previously ignored it, so an
-        unreachable target silently produced a qpos that leaves the hand somewhere else
-        entirely, and the caller then "corrected" against a pose it never achieved.
+        Genesis returns a best-effort qpos even when it fails to converge, and only
+        reports that via return_error=True. Unreachable targets otherwise look fine.
         """
         try:
             q, err = self.robot.inverse_kinematics(
@@ -699,7 +613,7 @@ class RobotAdapter:
             e = _to_np(err).ravel()
             pos_err = float(np.linalg.norm(e[:3]))
         except TypeError:
-            # Older signature without return_error — fall back to unchecked.
+            # Older signature without return_error: fall back to unchecked.
             q = self.robot.inverse_kinematics(link=self.get_link("hand"), pos=pos, quat=quat)
             return q, float("nan")
 
@@ -738,67 +652,6 @@ class RobotAdapter:
                   f"{arm_track_err[worst]:.5f} rad "
                   f"(commanded {q_goal[worst]:+.4f}, reached {q_end[worst]:+.4f}); "
                   f"per-joint err={np.round(arm_track_err, 5)}")
-
-    def pre_grasp_pose(
-        self,
-        pos,
-        quat,
-        approach_dir: np.ndarray = np.array([0.0, 0.0, 1.0]),
-        offset: float = 0.10,
-        steps: int = 30,
-    ):
-        """
-        Move the end-effector to a pre-grasp position offset from the given pos
-        along the specified approach direction.
-
-        NOTE: Here `pos` is interpreted as a target hand position (not block center).
-        Uses local joint-space servo (no OMPL) for this short motion.
-        """
-        pos = _to_np(pos)
-        approach_dir = _to_np(approach_dir)
-        self.print_ee_pose("Before pre_grasp_pose()")
-
-        pregrasp_pos = pos + approach_dir * offset
-        print(f"[DEBUG] Pre-grasp hand position: {pregrasp_pos}")
-
-        qpos_pregrasp = self.inverse_kinematics(
-            link=self.get_link("hand"),
-            pos=pregrasp_pos,
-            quat=quat,
-        )
-        self._servo_to_q(qpos_pregrasp, steps=steps)
-
-        self.print_ee_pose("After pre_grasp_pose()")
-
-    def post_grasp_pose(
-        self,
-        pos,
-        quat,
-        approach_dir: np.ndarray = np.array([0.0, 0.0, -1.0]),
-        offset: float = 0.10,
-        steps: int = 30,
-    ):
-        """
-        Move the end-effector away from a grasped pose (opposite of approach_dir).
-
-        NOTE: Here `pos` is interpreted as a target hand position (not block center).
-        Uses local joint-space servo (no OMPL).
-        """
-        pos = _to_np(pos)
-        approach_dir = _to_np(approach_dir)
-        self.print_ee_pose("Before post_grasp_pose()")
-
-        retreat_pos = pos - approach_dir * offset
-        print(f"[DEBUG] Post-grasp hand position: {retreat_pos}")
-
-        qpos_postgrasp = self.inverse_kinematics(
-            link=self.get_link("hand"),
-            pos=retreat_pos,
-            quat=quat,
-        )
-        self._servo_to_q(qpos_postgrasp, steps=steps)
-
-        self.print_ee_pose("After post_grasp_pose()")
 
     # ------------------------------------------------------------------
     # High-level actions (obj is optional for logging / logic)
@@ -842,20 +695,9 @@ class RobotAdapter:
 
         self.print_ee_pose("Before pick()")
 
-        # 1) Approach in three stages: lift clear, translate above the block, then descend.
-        #
-        # This used to be a single blind joint-space interpolation from wherever the arm
-        # happened to be straight to the pre-grasp pose. Joint-space interpolation says
-        # nothing about the path the gripper sweeps through Cartesian space, so the arm
-        # ploughed through whatever lay between. Measured on goal 2 scene 2: block R was
-        # shoved progressively toward the base over four successive pick attempts,
-        # r = 0.398 -> 0.355 -> 0.296 -> 0.262 m, each approach nudging it further. The
-        # descent itself was accurate to 0.0 mm every time, but the fingers closed on empty
-        # air (width 0.0000-0.0132 instead of the 0.0396 a seated cube gives) because the
-        # block was no longer where it had been perceived. The executive then replanned the
-        # same PICKUP and pushed it again, six times, before giving up.
-        #
-        # Lifting above every block before translating removes the sweep entirely.
+        # Approach in three stages: lift clear, translate above the block, then descend.
+        # A direct joint-space move sweeps the gripper through whatever lies between and
+        # pushes blocks off the positions we just perceived them at.
         pregrasp_target = hand_at_center.copy()
         pregrasp_target[2] = target_grasp_z + 1.5 * self.block_size  # ~6 cm above
 
@@ -884,15 +726,8 @@ class RobotAdapter:
         z_start = current_hand_pos[2]
         z_goal = hand_at_center[2] - 0.001
 
-        # The descent covers roughly 90 mm. At the previous 30 steps (0.3 s at dt=0.01)
-        # that commands ~0.3 m/s, which the stiff position controller (kp=4500) overshoots:
-        # measured, a descent commanded to z=0.1190 actually came to rest at z=0.1124.
-        # Since the fingertips sit 0.1124 m below the hand frame (measured), that put the
-        # fingertips at exactly z=0 — jammed into the table — so the fingers could not
-        # close around the cube and stalled at width=0.0594 instead of the 0.0396 a seated
-        # 4 cm cube gives. At 150 steps (1.5 s, ~0.06 m/s) the same descent settles at
-        # z=0.1159, leaving the fingertips 3.4 mm clear of the table and seating the
-        # fingers properly on the cube.
+        # ~90 mm at 150 steps is 0.06 m/s. At 30 steps the kp=4500 controller overshot
+        # 6.6 mm, driving the fingertips into the table so they could not close.
         descent_steps = 150
         print(
             f"[DEBUG] Slow vertical descent from z={z_start:.4f} "
@@ -1042,18 +877,15 @@ class RobotAdapter:
         print("[DEBUG] desired object pos above:", np.round(pos_above_obj, 4))
 
         target_hand_pos_above = pos_above_obj - off
-        # Approach at a height where the carried block clears every other stack. OMPL only
-        # collision-checks the robot, not the cube in the gripper, so a hover chosen purely
-        # relative to the target can still drag that cube through a neighbouring tower on
-        # the way in. The XY alignment below happens at this height; only then do we descend.
+        # Hover high enough that the carried block clears every other stack; OMPL
+        # collision-checks the robot but not the cube in the gripper.
         safe_z = self._safe_transit_hand_z()
         if target_hand_pos_above[2] < safe_z:
             print(f"[PLACE] raising approach from z={target_hand_pos_above[2]:.4f} to "
                   f"{safe_z:.4f} so the carried block clears the tallest stack")
             target_hand_pos_above[2] = safe_z
 
-        # === 2) Carry to the hover point: straight Cartesian line at the safe height ===
-        # (This replaced an OMPL joint-space move -- see _cartesian_transit for why.)
+        # 2) Carry to the hover point along a straight line at the safe height.
         self._cartesian_transit(target_hand_pos_above[:2], quat_place,
                                 z=target_hand_pos_above[2])
         self.print_ee_pose("[DEBUG] After transit to hover")
@@ -1096,8 +928,8 @@ class RobotAdapter:
 
             if err_norm > 0.05 and obj is not None and obj is self.attached_object:
                 # An error this large at hover means the block is not in the fingers any
-                # more — correcting toward it just walks the empty hand across the table.
-                print(f"[CORRECTION] error {err_norm:.3f} m implies the grasp was lost — "
+                # more, so correcting toward it just walks the empty hand across the table.
+                print(f"[CORRECTION] error {err_norm:.3f} m implies the grasp was lost, "
                       f"abandoning this placement for replanning.")
                 self.open_gripper()
                 self.detach_object()  # align the logical state with the physical one
@@ -1147,14 +979,9 @@ class RobotAdapter:
             print(f"[CORRECTION {it}] hand moved ({moved[0]:+.6f}, {moved[1]:+.6f}) "
                   f"vs commanded ({dx:+.6f}, {dy:+.6f}), ik_residual={ik_err*1000:.2f}mm")
 
-        # === 4) Descend to *final* placement height, with feedback at the bottom ===
-        #
-        # The XY correction above runs at HOVER height; the descent then used to be
-        # open-loop. At some arm poses the block shifts ~3 mm on the way down (measured:
-        # hover error 0.3 mm, landed error 2.9-3.3 mm), which is just over the 2 mm
-        # at-position threshold -- so the planner endlessly re-placed those blocks.
-        # The threshold is right; the descent needed closing the loop: measure at the
-        # bottom, and if off, lift a little and re-correct rather than releasing wrong.
+        # 4) Descend to final height, re-checking XY at the bottom. The correction
+        # above runs at hover; the block can still shift ~3 mm on the way down, which is
+        # over the 2 mm at-position threshold. Measure before releasing, not after.
         final_obj_pos = pos.copy()
         final_obj_pos[2] += release_clearance  # 0.0 by default
         final_hand_pos = final_obj_pos - off
@@ -1177,20 +1004,15 @@ class RobotAdapter:
                 break
 
             if bottom_norm > 0.05:
-                # A metre-scale (or even cm-scale) reading here does not mean
-                # "misaligned"; it means the block is NO LONGER IN THE GRIPPER.
-                # Chasing it with the corrective shift commanded hand positions metres
-                # outside the workspace (measured: a 7.5 m "error" applied as a shift).
-                # The honest response is to align the logical state with physics and let
-                # the closed-loop executive re-perceive and re-plan the pick.
+                # This size of error means the block is gone, not misaligned. Chasing
+                # it commanded hand positions metres outside the workspace.
                 print(f"[PLACE-BOTTOM] error {bottom_norm:.3f} m implies the grasp was "
-                      f"lost mid-place — abandoning this placement for replanning.")
+                      f"lost mid-place, abandoning this placement for replanning.")
                 self.open_gripper()
                 self.detach_object()
                 return
 
-            # Genuinely misaligned but still held: lift 3 cm, shift the hand by the
-            # measured error, and descend again.
+            # Misaligned but still held: lift, shift by the measured error, retry.
             lift = final_hand_pos.copy()
             lift[2] += 0.03
             q_lift, _ = self._ik(lift, quat_place, label="place-relift")

@@ -1,7 +1,7 @@
 """Independent verification that a run actually achieved its goal.
 
 The demo prints "GOAL REACHED" whenever the planner returns an empty plan. That is a
-claim about the ABSTRACTED state, so it is only as trustworthy as the abstraction —
+claim about the ABSTRACTED state, so it is only as trustworthy as the abstraction,
 which is itself code under test. This module re-derives the structure from the raw block
 positions in the run log and checks it against the goal geometrically, plus checks that
 the video is real.
@@ -24,11 +24,8 @@ Z_TOL = 0.005
 def goal_stacks(goal_id):
     """Derive bottom->top stacks from the goal spec itself.
 
-    Hardcoding the expected structure here duplicates the goal definition and lets the
-    two drift apart -- which is exactly what happened on the first pass: this file
-    assumed goal 2 was the 6-block tower its comment and the README describe, while
-    get_goal_predicates(2) actually specifies only five (it puts 'g' on the table
-    instead of on 'c'). Deriving from the spec keeps one source of truth.
+    Hardcoding the expected structure would duplicate the goal definition and let the two
+    drift apart, so read it from get_goal_predicates() instead.
     """
     from pddl.problem_generator import get_goal_predicates
 
@@ -158,7 +155,7 @@ def verify(log_path, goal):
           f"   max XY dev {max(xy_devs)*1000:.2f} mm, max Z dev {max(z_devs)*1000:.2f} mm")
     print(f"  video                     : {'ok' if vid_ok else 'FAILED'} ({vid_msg})")
     if claimed != ok_all:
-        print("  !! demo's claim disagrees with the geometry — trust the geometry")
+        print("  !! demo's claim disagrees with the geometry; trust the geometry")
     for d in details:
         print(f"    - {d}")
     return verdict == "PASS"

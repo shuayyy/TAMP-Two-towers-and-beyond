@@ -1,25 +1,13 @@
 """
-Task Planner Integration (Phase 3)
+Task planning: perceived predicates -> PDDL problem -> pyperplan -> action list.
 
-This module connects:
-  - Phase 1: symbolic_abstraction.abstract_state(...)
-  - Phase 2: pddl.problem_generator.make_problem_pddl(...)
-  - pyperplan: external planner
+  plan_symbolic(predicates, goal_id) -> [("PICKUP", "r"), ("STACK", "r", "g"), ...]
 
-Goal:
-  plan_symbolic(predicates, goal_id) -> list of high-level actions
-
-Each action is a tuple, e.g.:
-  ("PICKUP", "r")
-  ("STACK", "r", "g")
-  ("UNSTACK", "r", "g")
-  ("PUTDOWN", "r")
-
-Author: Ajay (Phase 3)
+Goals 1-3 use A* (optimal, small problems); goal 4 uses enforced hill-climbing over its
+position-aware domain. An empty plan means the goal already holds, which is success.
 """
 
 from typing import List, Tuple, Set
-import subprocess
 from pathlib import Path
 
 from pddl.problem_generator import make_problem_pddl, DOMAIN_FILE
@@ -82,54 +70,9 @@ def run_pyperplan(domain_file: str, problem_file: str, goal_id: int = 1) -> str:
         
         return plan_text
         
-    except ImportError:
-        # Fallback to subprocess if pyperplan not importable
-        print("[task_planner] Could not import pyperplan, falling back to subprocess...")
-        return _run_pyperplan_subprocess(domain_file, problem_file)
     except Exception as e:
         print(f"[task_planner] Error running pyperplan: {e}")
         raise
-
-
-def _run_pyperplan_subprocess(domain_file: str, problem_file: str) -> str:
-    """
-    Fallback method: Call pyperplan via subprocess.
-    """
-    cmd = [
-        "python3",
-        "-m",
-        "pyperplan",
-        domain_file,
-        problem_file,
-    ]
-
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-    )
-
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-
-    if result.returncode != 0:
-        print("[task_planner] pyperplan subprocess failed.")
-        print("[task_planner] STDOUT:\n", stdout)
-        print("[task_planner] STDERR:\n", stderr)
-        raise RuntimeError("Pyperplan failed; see logs above.")
-
-    # Check if .soln file was created
-    problem_path = Path(problem_file)
-    soln_path = problem_path.with_suffix(".soln")
-
-    if soln_path.exists():
-        plan_text = soln_path.read_text()
-        print(f"[task_planner] Plan loaded from {soln_path}")
-        return plan_text
-
-    print("[task_planner] ERROR: No .soln file created and no plan in output")
-    print("[task_planner] STDOUT:\n", stdout)
-    raise RuntimeError("No plan found from pyperplan subprocess.")
 
 
 def parse_plan(plan_text: str) -> List[Action]:
@@ -189,7 +132,7 @@ def plan_symbolic(current_predicates: Set[Tuple],
                   goal_id: int,
                   problem_name: str = "demo_goal") -> List[Action]:
     """
-    Main API for Phase 3.
+    Plan from the current perceived state toward `goal_id`.
 
     Input:
         current_predicates: set of tuples from abstract_state(...)
@@ -229,13 +172,8 @@ def plan_symbolic(current_predicates: Set[Tuple],
     plan = parse_plan(plan_text)
 
     if not plan:
-        # An empty plan is SUCCESS, not failure: pyperplan returns a zero-action plan when
-        # the goal already holds in the initial state. run_pyperplan() has already raised
-        # for the genuinely unsolvable case (search_plan returns None), so reaching here
-        # with no actions means there is nothing left to do.
-        #
-        # This used to raise, which made demo.py's "if not plan: GOAL REACHED" branch
-        # unreachable — every successful run was reported as a planning error.
+        # Empty plan = goal already holds. run_pyperplan() already raised for the
+        # genuinely unsolvable case.
         print("[task_planner] Empty plan: goal already satisfied in the current state.")
         return []
 
@@ -243,21 +181,8 @@ def plan_symbolic(current_predicates: Set[Tuple],
     for i, act in enumerate(plan):
         print(f"  {i}: {act}")
 
-    # NOTE: this used to pass goal-4 plans through reorder_plan_by_layers(). That reorder
-    # is both unnecessary and provably harmful:
-    #
-    #   * unnecessary -- bottom-before-top is already enforced by the DOMAIN: stack-at
-    #     requires (at-position ?y ?p-bottom), so no valid plan can place a top block
-    #     before its support is in position. The planner's own order is always sound.
-    #
-    #   * harmful -- it paired PICKUP+PLACE actions and moved unpaired actions to the
-    #     end. When execution is closed-loop, a plan computed while the hand is already
-    #     holding a block BEGINS with an unpaired putdown-at/stack-at. The reorder
-    #     shuffled that mandatory first action to the back, so the executed first action
-    #     became a PICKUP with the hand full: pick() opened the gripper, dropped the held
-    #     block wherever the arm was, and grabbed the other one -- observed as an endless
-    #     PICKUP y1 / PICKUP y2 alternation with every grasp succeeding and nothing ever
-    #     placed.
+    # Goal-4 plans are returned in planner order. Bottom-before-top is already enforced
+    # by the domain: stack-at requires (at-position ?y ?p-bottom).
     return plan
 
 

@@ -53,6 +53,10 @@ recordings/
 *.avi
 *.gif
 *.webm
+
+# ...but the goal result videos are deliverables, not run artifacts
+!outputs/
+!outputs/*.mp4
 *.png
 *.jpg
 *.jpeg
@@ -101,3 +105,10 @@ tmp/
 *.bak
 *.orig
 *.rej
+
+# Claude Code project instructions (local only)
+CLAUDE.md
+
+# Claude Code agent config (local only)
+.claude/
+STATE.md

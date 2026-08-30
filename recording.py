@@ -21,9 +21,7 @@ no-op and the demos behave exactly as before.
 
 from typing import Optional, Tuple
 
-# ---------------------------------------------------------------------------
 # Module configuration, set once by the entry point before the scene is built.
-# ---------------------------------------------------------------------------
 _headless: bool = False
 _video_path: Optional[str] = None
 _res: Tuple[int, int] = (960, 540)
